@@ -209,6 +209,10 @@ def set_openai_key_for_runtime(key: str):
 # ==============================
 st.set_page_config(page_title="TMIV — The Most Important Variables", layout="wide")
 
+# Bezpieczny default – nadpiszemy po wczytaniu danych
+perf_mode = False
+
+
 # STYLE: zawijanie etykiet w st.metric
 st.markdown(
     """
@@ -571,9 +575,15 @@ with c1:
     st.caption("Status klucza OpenAI")
 with c2:
     if _looks_like_openai_key(current_key):
-        st.markdown("<span style='color: white; background-color: green; padding: 4px 10px; border-radius: 10px;'>🟢 OpenAI aktywny</span>", unsafe_allow_html=True)
+        st.markdown(
+            "<span style='color: white; background-color: green; padding: 4px 10px; border-radius: 10px;'>🟢 OpenAI aktywny</span>",
+            unsafe_allow_html=True
+        )
     else:
-        st.markdown("<span style='color: white; background-color: red; padding: 4px 10px; border-radius: 10px;'>🔴 Brak klucza OpenAI</span>", unsafe_allow_html=True)
+        st.markdown(
+            "<span style='color: white; background-color: red; padding: 4px 10px; border-radius: 10px;'>🔴 Brak klucza OpenAI</span>",
+            unsafe_allow_html=True
+        )
 
 # Pole do wpisania tylko jeśli nie wykryto automatycznie
 if not _looks_like_openai_key(current_key):
@@ -597,18 +607,11 @@ df, dataset_name = dataset_selector(settings.sample_data_path)
 if df is None or df.empty:
     st.stop()
 
-    # Automatyczny „tryb szybki” tylko dla EDA (bez widocznego przełącznika)
-    # Heurystyka: jeśli >20k wierszy, wiele widoków EDA działa na próbce.
-    perf_mode = len(df) > 20000
+# Automatyczny „tryb szybki” tylko dla EDA (bez przełącznika)
+# Heurystyka: jeśli >20k wierszy, EDA działa na próbce.
+perf_mode = len(df) > 20_000
+df_view = df.sample(20_000, random_state=42) if perf_mode else df
 
-    df_view = df
-    if perf_mode:
-        df_view = df.sample(20000, random_state=42)
-
-# kopia do EDA zależna od trybu szybkiego
-df_view = df
-if perf_mode and len(df) > 20000:
-    df_view = df.sample(20000, random_state=42)
 
 # ==============================
 # 🔬 EDA
