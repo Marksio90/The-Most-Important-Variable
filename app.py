@@ -1,4 +1,3 @@
-# app.py — TMIV (EDA + trening + historia + ZIP) — wersja z FORM + Tryb szybki + Sidebar Tools + extra EDA
 from __future__ import annotations
 
 # ==============================
@@ -24,11 +23,13 @@ import plotly.graph_objects as go
 import streamlit as st
 from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype
 from sklearn.decomposition import PCA
+from sklearn.metrics import average_precision_score
 from sklearn.model_selection import learning_curve
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, roc_curve, auc, precision_recall_curve
 )
+
 
 # ===== Konfiguracja/komponenty UI =====
 try:
@@ -142,6 +143,7 @@ def glossary_box(location: str = "sidebar"):
             _render()
     else:
         _render()
+
 
 # --- Kwantyle rozkładu normalnego: ppf z fallbackiem bez SciPy ---
 try:
@@ -538,28 +540,8 @@ with st.sidebar:
         except Exception as e:
             st.warning(f"Nie udało się wyczyścić cache: {e}")
 
-    with st.expander("🩺 Health"):
-        from datetime import datetime
-        base = Path("tmiv_out")
-        model_path = base / "model.joblib"
-
-        def _mtime(p: Path):
-            try:
-                return datetime.fromtimestamp(p.stat().st_mtime).isoformat(sep=" ", timespec="seconds")
-            except Exception:
-                return None
-
-        st.write({
-            "cwd": str(Path.cwd()),
-            "tmiv_out": base.exists(),
-            "model.joblib": model_path.exists(),
-            "model.joblib_mtime": _mtime(model_path),
-            "joblib_in_subdirs": [str(p.relative_to(base)) for p in base.rglob("*.joblib")][:20],
-        })
-
-    # Słowniczek w sidebarze (lista wyboru)
+    # Słowniczek (jako lista wyboru)
     glossary_box("sidebar")
-
 
 # ==============================
 # HEADER + DANE
@@ -1308,9 +1290,12 @@ def build_and_save_full_reports(out_dir: Path) -> Dict[str, List[str]]:
                 if files: created["roc_curve"] = files
 
                 prec, rec, _ = precision_recall_curve(y_true, proba)
+                ap = average_precision_score(y_true, proba)
                 fig_pr = go.Figure()
                 fig_pr.add_trace(go.Scatter(x=rec, y=prec, mode="lines", name="PR curve"))
-                fig_pr.update_layout(title="Precision–Recall curve", xaxis_title="Recall", yaxis_title="Precision", height=500, template="plotly_dark")
+                fig_pr.update_layout(title=f"Precision–Recall curve (AP={ap:.3f})",
+                                    xaxis_title="Recall", yaxis_title="Precision",
+                                    height=500, template="plotly_dark")
                 p, h = _save_plotly(fig_pr, out_dir, "precision_recall_curve")
                 files = [str(x) for x in [p, h] if x]
                 if files: created["precision_recall_curve"] = files
@@ -1970,10 +1955,10 @@ if st.session_state.get("model") is not None and st.session_state.get("X_last") 
     with st.expander("ℹ️ Jak korzystać z szybkich predykcji?", expanded=False):
         st.markdown("""
     - **Domyślnie** pokazujemy predykcje dla pierwszych *n* wierszy danych treningowych (X_last).
-    - Możesz **wkleić próbkę CSV** z nagłówkiem **identycznym jak w X_last** (kolumny i ich typy).  
-    - Dozwolone są **braki** – model poradzi sobie, jeśli takie same braki występowały w treningu.
-    - Jeśli w treningu zastosowano **transformacje dat**, nie wklejaj kolumn pochodnych (np. `__year`) – podaj **oryginalną** kolumnę daty.
-    - Aby pobrać wyniki, użyj przycisku **„⬇️ Pobierz predykcje (CSV)”**.
+    - Możesz **wkleić próbkę CSV** z nagłówkiem **identycznym jak w X_last** (kolumny i ich typy).
+    - Braki są dozwolone — pipeline ma wbudowaną **imputację**.
+    - Jeśli w treningu tworzono cechy z dat, podawaj **oryginalną kolumnę daty**, a nie kolumny pochodne (`__year`, `__month`).
+    - Użyj **„⬇️ Pobierz predykcje (CSV)”**, aby zapisać wyniki.
     """)
 
     cqp1, cqp2 = st.columns([1, 1])
