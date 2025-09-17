@@ -129,18 +129,19 @@ GLOSSARY: Dict[str, str] = {
 }
 
 def glossary_box(location: str = "sidebar"):
-    """Wyświetl czytelny słowniczek pojęć."""
+    """Słowniczek pojęć jako lista wyboru (pokazuje tylko jedno hasło naraz)."""
     def _render():
         st.markdown("### 🧠 Słowniczek pojęć")
-        for term, note in GLOSSARY.items():
-            with st.expander(f"**{term}**", expanded=False):
-                st.write(note)
+        terms = ["(wybierz hasło)"] + sorted(GLOSSARY.keys())
+        sel = st.selectbox("Hasło", terms, index=0, key="glossary_sel")
+        if sel != "(wybierz hasło)":
+            st.markdown(f"**{sel}**")
+            st.write(GLOSSARY.get(sel, "—"))
     if location == "sidebar":
         with st.sidebar:
             _render()
     else:
         _render()
-
 
 # --- Kwantyle rozkładu normalnego: ppf z fallbackiem bez SciPy ---
 try:
@@ -521,19 +522,9 @@ except Exception:
 
 
 # ==============================
-# SIDEBAR — tryb szybki + narzędzia
+# SIDEBAR — narzędzia + health + słowniczek
 # ==============================
 with st.sidebar:
-    st.markdown("### ⚙️ Ustawienia")
-    perf_mode = st.toggle(
-        "⚡ Tryb szybki (lite)",
-        value=False,
-        help=(
-            "EDA działa na próbce (do 20k wierszy), a część wykresów ogranicza liczbę punktów. "
-            "Trenowanie modelu wciąż używa pełnego zbioru — chyba że wybierzesz Próbkę 5k/1k w formularzu."
-        )
-    )
-
     st.markdown("### 🛠️ Narzędzia")
     if st.button("🧹 Wyczyść cache"):
         try:
@@ -542,41 +533,6 @@ with st.sidebar:
             st.success("Cache wyczyszczony.")
         except Exception as e:
             st.warning(f"Nie udało się wyczyścić cache: {e}")
-
-    def _make_artifacts_zip() -> bytes:
-        buf = BytesIO()
-        base = Path("tmiv_out")
-        base.mkdir(exist_ok=True, parents=True)
-        with ZipFile(buf, "w", compression=ZIP_DEFLATED) as zf:
-            for p in base.rglob("*"):
-                if p.is_file():
-                    zf.write(p, arcname=str(p.relative_to(base.parent)))
-        buf.seek(0)
-        return buf.read()
-
-    if st.button("📦 Zrób ZIP z tmiv_out"):
-        try:
-            base = Path("tmiv_out")
-            base.mkdir(exist_ok=True, parents=True)
-
-            # ⭐ 1) Najpierw zbuduj świeże raporty (PNG/HTML + README)
-            created = build_and_save_full_reports(base)
-            if created:
-                st.toast(f"Wygenerowano raporty: {', '.join(created.keys())}", icon="📄")
-            else:
-                st.toast("Brak nowych raportów (brak modelu?). Spakuję istniejące pliki.", icon="ℹ️")
-
-            # ⭐ 2) Dopiero teraz pakujemy artefakty
-            zbytes = _make_artifacts_zip()
-            st.download_button(
-                "Pobierz artifacts.zip",
-                data=zbytes,
-                file_name="artifacts.zip",
-                mime="application/zip",
-                type="primary",
-            )
-        except Exception as e:
-            st.warning(f"Nie udało się spakować artefaktów: {e}")
 
     with st.expander("🩺 Health"):
         from datetime import datetime
@@ -597,7 +553,9 @@ with st.sidebar:
             "joblib_in_subdirs": [str(p.relative_to(base)) for p in base.rglob("*.joblib")][:20],
         })
 
-        glossary_box("sidebar")
+    # Słowniczek w sidebarze (lista wyboru)
+    glossary_box("sidebar")
+
 
 # ==============================
 # HEADER + DANE
@@ -639,6 +597,14 @@ df, dataset_name = dataset_selector(settings.sample_data_path)
 if df is None or df.empty:
     st.stop()
 
+    # Automatyczny „tryb szybki” tylko dla EDA (bez widocznego przełącznika)
+    # Heurystyka: jeśli >20k wierszy, wiele widoków EDA działa na próbce.
+    perf_mode = len(df) > 20000
+
+    df_view = df
+    if perf_mode:
+        df_view = df.sample(20000, random_state=42)
+
 # kopia do EDA zależna od trybu szybkiego
 df_view = df
 if perf_mode and len(df) > 20000:
@@ -658,6 +624,8 @@ EDA_MODES = [
     "Scatter: num → target (+trend)",
     "Szereg czasowy (data → target)",
     "Top kategorie (częstości)",
+    "Krzywa uczenia (z ostatniego modelu)",
+    "PCA 2D (z ostatniego modelu)",
     "Parowy podgląd (2 zmienne)",
     "Macierz par (scatter-matrix)",
     "Mapa braków (missingness)",
@@ -871,6 +839,28 @@ elif eda_choice == "Rozkład targetu wg kategorii (top-k)":
                      .encode(y="mean_val:Q"))
                 , use_container_width=True
             )
+
+elif eda_choice == "Krzywa uczenia (z ostatniego modelu)":
+    mdl = st.session_state.get("model")
+    X_last = st.session_state.get("X_last")
+    y_last = st.session_state.get("y_last")
+    meta = st.session_state.get("meta") or {}
+    if mdl is None or X_last is None or y_last is None:
+        st.info("Brak wytrenowanego modelu w bieżącej sesji.")
+    else:
+        fig = _plot_learning_curve(mdl, X_last, y_last, task=(meta.get("problem_type") or ""))
+        st.plotly_chart(fig, use_container_width=True)
+
+elif eda_choice == "PCA 2D (z ostatniego modelu)":
+    X_last = st.session_state.get("X_last")
+    y_last = st.session_state.get("y_last")
+    meta = st.session_state.get("meta") or {}
+    if X_last is None or y_last is None:
+        st.info("Brak danych z ostatniego treningu.")
+    else:
+        fig = _pca_preview_2d(X_last, y_last, task=(meta.get("problem_type") or ""))
+        st.plotly_chart(fig, use_container_width=True)
+           
 
 elif eda_choice == "QQ-plot (normalność)":
     # wybierz kolumnę numeryczną
@@ -1377,11 +1367,12 @@ def build_and_save_full_reports(out_dir: Path) -> Dict[str, List[str]]:
     return created
 
 # ==============================
-# 🏋️‍♂️ Trening — UI (FORM, bez resetów)
+# 🏋️‍♂️ Trening — UI
 # ==============================
 st.markdown("## 🏋️‍♂️ Trening")
-st.caption("**Silnik ML:** Auto (dobór silnika) – tryb stały")
+st.caption("**Silnik ML:** Auto (dobór silnika i opcji na podstawie danych")
 with st.form("train_form", clear_on_submit=False):
+    train_btn = st.form_submit_button("🚀 Wytrenuj model", type="primary")
     # Pierwszy rząd
     row1 = st.columns([1, 1, 1])
     with row1[0]:
@@ -1509,19 +1500,87 @@ def auto_prepare_data(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict
 
     return df2, info
 
+def _should_remove_outliers(df: pd.DataFrame, target: str) -> bool:
+    """Włącza filtr >3σ gdy rozkłady mocno skośne / ciężkie ogony i mamy wystarczająco danych."""
+    try:
+        if len(df) < 800: 
+            return False
+        num_cols = [c for c in df.columns if c != target and pd.api.types.is_numeric_dtype(df[c])]
+        if not num_cols:
+            return False
+        ratios = []
+        for c in num_cols:
+            s = pd.to_numeric(df[c], errors="coerce").dropna()
+            if s.empty: 
+                continue
+            mu, sd = float(s.mean()), float(s.std())
+            if not np.isfinite(sd) or sd == 0: 
+                continue
+            z = np.abs((s - mu) / sd)
+            ratios.append(float((z > 3).mean()))
+        return (len(ratios) > 0) and (np.mean(ratios) > 0.03)
+    except Exception:
+        return False
+
+def _auto_training_policy(df: pd.DataFrame, target: str) -> dict:
+    """Zwraca politykę: sample_size, cv_folds, compute_shap, remove_outliers, make_lc, make_pca."""
+    n = len(df)
+    # Próbka do treningu dla bardzo dużych zbiorów (EDA ma własny automat)
+    sample_mode = "all"
+    if n > 200_000:
+        sample_mode = "1k"
+    elif n > 50_000:
+        sample_mode = "5k"
+
+    # CV: stabilizacja tylko gdy danych jest sensownie dużo
+    cv_folds = 3 if n >= 2_000 else 0
+
+    # SHAP tylko dla mniejszych / średnich problemów
+    xcols = [c for c in df.columns if c != target]
+    compute_shap = (n <= 5_000) and (len(xcols) <= 50)
+
+    # Outliery wg heurystyki
+    remove_outliers = _should_remove_outliers(df, target)
+
+    # Dodatkowe wykresy po treningu – licz zawsze, ale na próbkach
+    make_lc = True
+    make_pca = True
+
+    return dict(
+        sample_mode=sample_mode,
+        cv_folds=cv_folds,
+        compute_shap=compute_shap,
+        remove_outliers=remove_outliers,
+        make_lc=make_lc,
+        make_pca=make_pca,
+    )
+
+def _apply_sample_mode(df: pd.DataFrame, mode: str, seed: int = 42) -> pd.DataFrame:
+    if mode == "5k" and len(df) > 5000:
+        return df.sample(5000, random_state=seed)
+    if mode == "1k" and len(df) > 1000:
+        return df.sample(1000, random_state=seed)
+    return df
+
 
 if train_btn and tgt_auto:
     target_name = tgt_auto
-    df_train = _sample_df(df, sample_mode)
 
-    # (opcjonalny krok) — outliery >3σ
-    if rm_outliers:
+    # Polityka doboru opcji
+    policy = _auto_training_policy(df, target_name)
+
+    # Próbkowanie danych do trenowania (jeśli trzeba)
+    df_train = _apply_sample_mode(df, {"all": "all", "5k": "5k", "1k": "1k"}[policy["sample_mode"]])
+
+    # (opcjonalne) outliery >3σ
+    if policy["remove_outliers"]:
         try:
             df_train = _remove_outliers_sigma(df_train, target=target_name, sigma=3.0)
-            st.caption(f"Usunięto outliery (>3σ); nowe rozmiary: {df_train.shape[0]} wierszy × {df_train.shape[1]} kol.")
+            st.caption(f"Usunięto outliery (>3σ); nowe rozmiary: {df_train.shape[0]}×{df_train.shape[1]}")
         except Exception as e:
             st.warning(f"Nie udało się zastosować filtra outlierów: {e}")
 
+    # Auto-przygotowanie danych
     df_train, _prep_info = auto_prepare_data(df_train, target_name)
     st.session_state["_prep_info"] = _prep_info
 
@@ -1530,9 +1589,8 @@ if train_btn and tgt_auto:
     except Exception:
         ptype = None
 
-    # ---- Silnik ML: stały tryb 'auto'
     engine_key = "auto"
-    cv_folds = 3 if run_cv else 0
+    cv_folds = int(policy["cv_folds"])
 
     with st.status("Trwa trenowanie...", expanded=False) as s:
         with st.spinner("Trening w toku…"):
@@ -1541,19 +1599,16 @@ if train_btn and tgt_auto:
                 target=target_name,
                 problem_type=ptype if ptype else None,
                 engine=engine_key,
-                cv_folds=int(cv_folds),
+                cv_folds=cv_folds,
                 out_dir="tmiv_out",
                 random_state=42,
-                compute_shap=bool(gen_shap_on_demand),
+                compute_shap=bool(policy["compute_shap"]),
             )
-
-            # --- NOWE: zapisz model lokalnie ---
+            # zapis modelu
             try:
                 from joblib import dump
-                out_dir = Path("tmiv_out")
-                out_dir.mkdir(parents=True, exist_ok=True)
+                out_dir = Path("tmiv_out"); out_dir.mkdir(parents=True, exist_ok=True)
                 dump(model, out_dir / "model.joblib")
-                # meta.json (opcjonalnie)
                 try:
                     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
                 except Exception:
@@ -1562,8 +1617,6 @@ if train_btn and tgt_auto:
             except Exception as e:
                 st.warning(f"Nie udało się zapisać modelu: {e}")
 
-            s.update(label="Zapis artefaktów...", state="running")
-
             st.session_state["model"] = model
             st.session_state["metrics"] = metrics
             st.session_state["fi_df"] = fi_df
@@ -1571,7 +1624,7 @@ if train_btn and tgt_auto:
             st.session_state["X_last"] = df_train.drop(columns=[target_name], errors="ignore")
             st.session_state["y_last"] = df_train[target_name] if target_name in df_train.columns else None
 
-        # === Raport o modelu (plot) ===
+        # Raport + dodatkowe wykresy (zawsze generujemy; LC/PCA trafiły też do EDA)
         try:
             report_fig = make_model_report_figure(
                 dataset_name=dataset_name or "dataset",
@@ -1584,27 +1637,22 @@ if train_btn and tgt_auto:
             )
             png_path, html_path = save_model_report(fig=report_fig, out_dir=Path("tmiv_out"))
             st.session_state["model_report_fig"] = report_fig
-            if png_path:
-                st.toast(f"Zapisano raport: {png_path.name}", icon="🖼️")
-            elif html_path:
-                st.toast(f"Zapisano raport HTML: {html_path.name}", icon="🖼️")
+            if png_path: st.toast(f"Zapisano raport: {png_path.name}", icon="🖼️")
+            elif html_path: st.toast(f"Zapisano raport HTML: {html_path.name}", icon="🖼️")
         except Exception as e:
             st.warning(f"Nie udało się zbudować raportu modelu: {e}")
 
-        # --- Wykresy dodatkowe: generuj raz po treningu i zapisz do sesji ---
+        # extra figs
         extra_figs = {}
         try:
             task_flag = (meta.get("problem_type") or "")
-            if show_learning_curve and isinstance(st.session_state["X_last"], pd.DataFrame) and st.session_state["y_last"] is not None:
-                extra_figs["lc"] = _plot_learning_curve(model, st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
-            if show_pca_preview and isinstance(st.session_state["X_last"], pd.DataFrame) and st.session_state["y_last"] is not None:
-                extra_figs["pca"] = _pca_preview_2d(st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
+            extra_figs["lc"] = _plot_learning_curve(model, st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
+            extra_figs["pca"] = _pca_preview_2d(st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
         except Exception as e:
             st.warning(f"Nie udało się wygenerować dodatkowych wykresów: {e}")
-
         st.session_state["extra_figs"] = extra_figs
 
-        # Dolicz MAPE/SMAPE jeśli to regresja
+        # MAPE/SMAPE gdy regresja
         try:
             if isinstance(st.session_state.get("X_last"), pd.DataFrame) and st.session_state.get("y_last") is not None:
                 problem = (meta.get("problem_type") or "").lower()
@@ -1618,7 +1666,7 @@ if train_btn and tgt_auto:
         except Exception:
             pass
 
-        # Zapisz historię
+        # Log historii
         try:
             log_run(
                 conn,
@@ -1634,7 +1682,6 @@ if train_btn and tgt_auto:
             st.warning(f"Nie udało się zapisać historii: {e}")
 
         s.update(label="Gotowe ✅", state="complete")
-
 
 # ==============================
 # 📊 Wyniki + wizualizacje + eksport
@@ -1917,6 +1964,15 @@ if st.session_state.get("model") is not None and st.session_state.get("X_last") 
     # ---------- Sekcja: Szybkie predykcje ----------
     st.markdown("## 🔮 Szybkie predykcje")
 
+    with st.expander("ℹ️ Jak korzystać z szybkich predykcji?", expanded=False):
+        st.markdown("""
+    - **Domyślnie** pokazujemy predykcje dla pierwszych *n* wierszy danych treningowych (X_last).
+    - Możesz **wkleić próbkę CSV** z nagłówkiem **identycznym jak w X_last** (kolumny i ich typy).  
+    - Dozwolone są **braki** – model poradzi sobie, jeśli takie same braki występowały w treningu.
+    - Jeśli w treningu zastosowano **transformacje dat**, nie wklejaj kolumn pochodnych (np. `__year`) – podaj **oryginalną** kolumnę daty.
+    - Aby pobrać wyniki, użyj przycisku **„⬇️ Pobierz predykcje (CSV)”**.
+    """)
+
     cqp1, cqp2 = st.columns([1, 1])
     with cqp1:
         n_preview = st.number_input("Podgląd na head(n)", min_value=5, max_value=200, value=20, step=1)
@@ -1987,6 +2043,30 @@ try:
         df_hist = pd.DataFrame()
 except Exception:
     df_hist = pd.DataFrame()
+
+# Po pobraniu df_hist
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+    tz_pl = ZoneInfo("Europe/Warsaw")
+except Exception:
+    tz_pl = None
+
+def _fix_tz(dfh: pd.DataFrame) -> pd.DataFrame:
+    if dfh is None or dfh.empty:
+        return dfh
+    # znajdź kolumny czasu
+    cand_cols = [c for c in dfh.columns if any(k in c.lower() for k in ["time", "date", "created", "updated", "timestamp"])]
+    for c in cand_cols:
+        try:
+            s = pd.to_datetime(dfh[c], errors="coerce", utc=True)  # zakładamy, że w DB jest UTC
+            if tz_pl is not None:
+                s = s.dt.tz_convert(tz_pl).dt.tz_localize(None)
+            dfh[c] = s
+        except Exception:
+            pass
+    return dfh
+
+df_hist = _fix_tz(df_hist)
 
 if df_hist is None or df_hist.empty:
     if st.session_state["history_cleared"]:
