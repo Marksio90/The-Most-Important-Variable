@@ -1355,73 +1355,36 @@ def build_and_save_full_reports(out_dir: Path) -> Dict[str, List[str]]:
     return created
 
 # ==============================
-# 🏋️‍♂️ Trening — UI
+# 🏋️‍♂️ Trening — AUTOMAT (bez opcji)
 # ==============================
 st.markdown("## 🏋️‍♂️ Trening")
-st.caption("**Silnik ML:** Auto")
-with st.form("train_form", clear_on_submit=False):
-    train_btn = st.form_submit_button("🚀 Wytrenuj model", type="primary")
-    # Pierwszy rząd
-    row1 = st.columns([1, 1, 1])
-    with row1[0]:
-        sample_mode = st.selectbox(
-            "Rozmiar próbki",
-            ["Cały zbiór", "Próbka 5k", "Próbka 1k"],
-            index=0,
-            help="Kontroluje tylko dane do trenowania modelu. "
-                 "EDA (analiza wstępna) korzysta z Trybu szybkiego w sidebarze."
-        )
-    with row1[1]:
-        run_cv = st.checkbox(
-            "3-fold CV (stabilność)",
-            value=False,
-            help="Walidacja krzyżowa (3 podziały). Raportujemy średnią i odchylenie metryki, "
-                 "aby ocenić stabilność i wariancję wyników."
-        )
-    with row1[2]:
-        gen_shap_on_demand = st.checkbox(
-            "SHAP na żądanie",
-            value=False,
-            help="Policzy wartości SHAP (wpływ cech na predykcję) na małej próbce. "
-                 "Może spowolnić działanie, dlatego liczony tylko gdy zaznaczysz."
-        )
+st.caption("**Silnik ML:** Auto (dobór silnika i opcji na podstawie danych). Trening zawsze na całym zbiorze.")
 
-    # Drugi rząd
-    row2 = st.columns([1, 1, 1])
-    with row2[0]:
-        rm_outliers = st.checkbox(
-            "Usuń outliery (>3σ)",
-            value=False,
-            help="Filtruje obserwacje odstające (|z-score|>3) dla kolumn numerycznych. "
-                 "Może ustabilizować model, ale usuwa też rzadkie przypadki."
-        )
-    with row2[1]:
-        show_learning_curve = st.checkbox(
-            "Krzywa uczenia",
-            value=False,
-            help="Pokazuje jakość modelu w funkcji rozmiaru próby (train vs CV). "
-                 "Pomaga wykryć underfitting (zbyt prosty) lub overfitting (zbyt skomplikowany)."
-        )
-    with row2[2]:
-        show_pca_preview = st.checkbox(
-            "PCA 2D (podgląd)",
-            value=False,
-            help="Szybki rzut PCA do 2D. Daje pogląd na strukturę danych i ewentualne klastry."
-        )
-
-    st.markdown("---")
-    train_btn = st.form_submit_button("🚀 Wytrenuj model", type="primary")
-
-
-def _sample_df(df: pd.DataFrame, mode: str, seed: int = 42) -> pd.DataFrame:
-    if mode == "Próbka 5k" and len(df) > 5000:
-        return df.sample(5000, random_state=seed)
-    if mode == "Próbka 1k" and len(df) > 1000:
-        return df.sample(1000, random_state=seed)
-    return df
-
+# ====== Helpery automatu (lokalne – bez UI) ======
+def _should_remove_outliers(df: pd.DataFrame, target: str) -> bool:
+    """Włącza filtr >3σ gdy rozkłady mocno skośne / ciężkie ogony i mamy wystarczająco danych."""
+    try:
+        if len(df) < 800:
+            return False
+        num_cols = [c for c in df.columns if c != target and pd.api.types.is_numeric_dtype(df[c])]
+        if not num_cols:
+            return False
+        ratios = []
+        for c in num_cols:
+            s = pd.to_numeric(df[c], errors="coerce").dropna()
+            if s.empty:
+                continue
+            mu, sd = float(s.mean()), float(s.std())
+            if not np.isfinite(sd) or sd == 0:
+                continue
+            z = np.abs((s - mu) / sd)
+            ratios.append(float((z > 3).mean()))
+        return (len(ratios) > 0) and (np.mean(ratios) > 0.03)
+    except Exception:
+        return False
 
 def auto_prepare_data(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Solidne przygotowanie danych bez UI. Zwraca (df_prepared, info_dict)."""
     info: Dict[str, Any] = {
         "dropped_rows_target": 0,
         "dropped_constant_cols": [],
@@ -1432,12 +1395,14 @@ def auto_prepare_data(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict
     }
     df2 = df.copy()
 
+    # usuwamy NaN w target
     if target in df2.columns:
         before = len(df2)
         df2 = df2.replace([np.inf, -np.inf], np.nan)
         df2 = df2.dropna(subset=[target])
         info["dropped_rows_target"] = before - len(df2)
 
+    # cechy z dat (year/month/dow)
     for col in list(df2.columns):
         if col == target:
             continue
@@ -1456,11 +1421,13 @@ def auto_prepare_data(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict
             except Exception:
                 pass
 
+    # stałe kolumny -> out
     const_cols = [c for c in df2.columns if c != target and df2[c].nunique(dropna=False) <= 1]
     if const_cols:
         df2.drop(columns=const_cols, inplace=True, errors="ignore")
         info["dropped_constant_cols"] = const_cols
 
+    # wysoka kategoryczność → zbij do OTHER (top 50)
     n = len(df2)
     for col in list(df2.columns):
         if col == target:
@@ -1472,6 +1439,7 @@ def auto_prepare_data(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict
                 df2[col] = np.where(df2[col].isin(top_vals), df2[col], "OTHER")
                 info["high_cardinality"][col] = {"n_unique": int(nunq), "kept": 50, "other": True}
 
+    # bezpieczne transformacje targetu (opcjonalnie)
     try:
         y = pd.to_numeric(df2[target], errors="coerce")
         if y.notna().mean() > 0 and (y > 0).mean() > 0.98 and abs(y.skew()) > 1.0:
@@ -1488,99 +1456,68 @@ def auto_prepare_data(df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict
 
     return df2, info
 
-def _should_remove_outliers(df: pd.DataFrame, target: str) -> bool:
-    """Włącza filtr >3σ gdy rozkłady mocno skośne / ciężkie ogony i mamy wystarczająco danych."""
-    try:
-        if len(df) < 800: 
-            return False
-        num_cols = [c for c in df.columns if c != target and pd.api.types.is_numeric_dtype(df[c])]
-        if not num_cols:
-            return False
-        ratios = []
-        for c in num_cols:
-            s = pd.to_numeric(df[c], errors="coerce").dropna()
-            if s.empty: 
-                continue
-            mu, sd = float(s.mean()), float(s.std())
-            if not np.isfinite(sd) or sd == 0: 
-                continue
-            z = np.abs((s - mu) / sd)
-            ratios.append(float((z > 3).mean()))
-        return (len(ratios) > 0) and (np.mean(ratios) > 0.03)
-    except Exception:
-        return False
-
 def _auto_training_policy(df: pd.DataFrame, target: str) -> dict:
-    """Zwraca politykę: sample_size, cv_folds, compute_shap, remove_outliers, make_lc, make_pca."""
+    """Dobór opcji bez UI: cv_folds, compute_shap, remove_outliers, make_lc, make_pca."""
     n = len(df)
-    # Próbka do treningu dla bardzo dużych zbiorów (EDA ma własny automat)
-    sample_mode = "all"
-    if n > 200_000:
-        sample_mode = "1k"
-    elif n > 50_000:
-        sample_mode = "5k"
-
-    # CV: stabilizacja tylko gdy danych jest sensownie dużo
     cv_folds = 3 if n >= 2_000 else 0
-
-    # SHAP tylko dla mniejszych / średnich problemów
     xcols = [c for c in df.columns if c != target]
     compute_shap = (n <= 5_000) and (len(xcols) <= 50)
-
-    # Outliery wg heurystyki
     remove_outliers = _should_remove_outliers(df, target)
-
-    # Dodatkowe wykresy po treningu – licz zawsze, ale na próbkach
-    make_lc = True
-    make_pca = True
-
     return dict(
-        sample_mode=sample_mode,
         cv_folds=cv_folds,
         compute_shap=compute_shap,
         remove_outliers=remove_outliers,
-        make_lc=make_lc,
-        make_pca=make_pca,
+        make_lc=True,
+        make_pca=True,
     )
 
-def _apply_sample_mode(df: pd.DataFrame, mode: str, seed: int = 42) -> pd.DataFrame:
-    if mode == "5k" and len(df) > 5000:
-        return df.sample(5000, random_state=seed)
-    if mode == "1k" and len(df) > 1000:
-        return df.sample(1000, random_state=seed)
-    return df
-
+# ====== Jeden przycisk (unikalny key!) ======
+train_btn = st.button("🚀 Wytrenuj model", type="primary", key="train_button_auto")
 
 if train_btn and tgt_auto:
     target_name = tgt_auto
+    steps: list[str] = []
 
-    # Polityka doboru opcji
-    policy = _auto_training_policy(df, target_name)
+    def _step(msg: str):
+        steps.append(msg)
+        st.write("• " + msg)
 
-    # Próbkowanie danych do trenowania (jeśli trzeba)
-    df_train = _apply_sample_mode(df, {"all": "all", "5k": "5k", "1k": "1k"}[policy["sample_mode"]])
+    with st.status("⏳ Startuję AUTO-pipeline…", expanded=True) as st_status:
+        # [1] Wybór polityki
+        policy = _auto_training_policy(df, target_name)
+        _step(f"[1/9] Plan: CV={policy['cv_folds']} | remove_outliers={policy['remove_outliers']} | SHAP={policy['compute_shap']}")
 
-    # (opcjonalne) outliery >3σ
-    if policy["remove_outliers"]:
+        # [2] Outliery (jeśli trzeba)
+        df_train = df.copy()
+        if policy["remove_outliers"]:
+            try:
+                df_train = _remove_outliers_sigma(df_train, target=target_name, sigma=3.0)
+                _step(f"[2/9] Usunięto outliery (>3σ). Nowy rozmiar: {df_train.shape[0]}×{df_train.shape[1]}")
+            except Exception as e:
+                _step(f"[2/9] Pomijam outliery (błąd: {e})")
+
+        # [3] Auto-przygotowanie danych
+        df_train, _prep_info = auto_prepare_data(df_train, target_name)
+        st.session_state["_prep_info"] = _prep_info
+        _step("[3/9] Auto-preprocessing: "
+              f"dropped_target_rows={_prep_info['dropped_rows_target']}, "
+              f"dropped_constant_cols={len(_prep_info['dropped_constant_cols'])}, "
+              f"date_feats={sum(len(v) for v in _prep_info['date_features'].values())}, "
+              f"high_cardinality_cols={len(_prep_info['high_cardinality'])}, "
+              f"target_transform={_prep_info['target_transform']}")
+
+        # [4] Detekcja typu problemu
         try:
-            df_train = _remove_outliers_sigma(df_train, target=target_name, sigma=3.0)
-            st.caption(f"Usunięto outliery (>3σ); nowe rozmiary: {df_train.shape[0]}×{df_train.shape[1]}")
-        except Exception as e:
-            st.warning(f"Nie udało się zastosować filtra outlierów: {e}")
+            ptype = detect_problem_type(df_train[target_name]) if target_name in df_train.columns else None
+        except Exception:
+            ptype = None
+        _step(f"[4/9] Wykryty typ problemu: {ptype or 'auto/reguły backendu'}")
 
-    # Auto-przygotowanie danych
-    df_train, _prep_info = auto_prepare_data(df_train, target_name)
-    st.session_state["_prep_info"] = _prep_info
+        # [5] Trening (silnik AUTO w backendzie)
+        engine_key = "auto"
+        cv_folds = int(policy["cv_folds"])
+        _step(f"[5/9] Trening: engine={engine_key}, CV={cv_folds}")
 
-    try:
-        ptype = detect_problem_type(df_train[target_name]) if target_name in df_train.columns else None
-    except Exception:
-        ptype = None
-
-    engine_key = "auto"
-    cv_folds = int(policy["cv_folds"])
-
-    with st.status("Trwa trenowanie...", expanded=False) as s:
         with st.spinner("Trening w toku…"):
             model, metrics, fi_df, meta = train_sklearn(
                 df_train,
@@ -1592,27 +1529,29 @@ if train_btn and tgt_auto:
                 random_state=42,
                 compute_shap=bool(policy["compute_shap"]),
             )
-            # zapis modelu
-            try:
-                from joblib import dump
-                out_dir = Path("tmiv_out"); out_dir.mkdir(parents=True, exist_ok=True)
-                dump(model, out_dir / "model.joblib")
-                try:
-                    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
-                except Exception:
-                    pass
-                st.toast("Model zapisany: tmiv_out/model.joblib", icon="💾")
-            except Exception as e:
-                st.warning(f"Nie udało się zapisać modelu: {e}")
 
-            st.session_state["model"] = model
-            st.session_state["metrics"] = metrics
-            st.session_state["fi_df"] = fi_df
-            st.session_state["meta"] = meta
-            st.session_state["X_last"] = df_train.drop(columns=[target_name], errors="ignore")
-            st.session_state["y_last"] = df_train[target_name] if target_name in df_train.columns else None
+        # [6] Zapis modelu i meta
+        try:
+            from joblib import dump
+            out_dir = Path("tmiv_out"); out_dir.mkdir(parents=True, exist_ok=True)
+            dump(model, out_dir / "model.joblib")
+            (out_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+            _step("[6/9] Zapisano model i meta do tmiv_out/")
+            st.toast("Model zapisany: tmiv_out/model.joblib", icon="💾")
+        except Exception as e:
+            _step(f"[6/9] Nie udało się zapisać modelu: {e}")
+            st.warning(f"Nie udało się zapisać modelu: {e}")
 
-        # Raport + dodatkowe wykresy (zawsze generujemy; LC/PCA trafiły też do EDA)
+        # [7] Utrwalenie w session_state
+        st.session_state["model"] = model
+        st.session_state["metrics"] = metrics
+        st.session_state["fi_df"] = fi_df
+        st.session_state["meta"] = meta
+        st.session_state["X_last"] = df_train.drop(columns=[target_name], errors="ignore")
+        st.session_state["y_last"] = df_train[target_name] if target_name in df_train.columns else None
+        _step("[7/9] Utrwalono model/metryki/cechy w session_state")
+
+        # [8] Raport i dodatkowe wykresy (LC, PCA)
         try:
             report_fig = make_model_report_figure(
                 dataset_name=dataset_name or "dataset",
@@ -1625,36 +1564,37 @@ if train_btn and tgt_auto:
             )
             png_path, html_path = save_model_report(fig=report_fig, out_dir=Path("tmiv_out"))
             st.session_state["model_report_fig"] = report_fig
-            if png_path: st.toast(f"Zapisano raport: {png_path.name}", icon="🖼️")
-            elif html_path: st.toast(f"Zapisano raport HTML: {html_path.name}", icon="🖼️")
-        except Exception as e:
-            st.warning(f"Nie udało się zbudować raportu modelu: {e}")
+            name_info = png_path.name if png_path else (html_path.name if html_path else "—")
+            _step(f"[8/9] Zapisano raport modelu ({name_info})")
 
-        # extra figs
-        extra_figs = {}
-        try:
-            task_flag = (meta.get("problem_type") or "")
-            extra_figs["lc"] = _plot_learning_curve(model, st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
-            extra_figs["pca"] = _pca_preview_2d(st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
+            # LC + PCA jako dodatkowe figi do podglądu w EDA
+            extra_figs = {}
+            try:
+                task_flag = (meta.get("problem_type") or "")
+                extra_figs["lc"] = _plot_learning_curve(model, st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
+                extra_figs["pca"] = _pca_preview_2d(st.session_state["X_last"], st.session_state["y_last"], task=task_flag)
+            except Exception as e:
+                _step(f"[8/9] Nie udało się wygenerować LC/PCA: {e}")
+            st.session_state["extra_figs"] = extra_figs
         except Exception as e:
-            st.warning(f"Nie udało się wygenerować dodatkowych wykresów: {e}")
-        st.session_state["extra_figs"] = extra_figs
+            _step(f"[8/9] Nie udało się zbudować raportu: {e}")
 
-        # MAPE/SMAPE gdy regresja
+        # [9] Dodatkowe metryki regresji (MAPE/SMAPE) jeśli sensowne
         try:
             if isinstance(st.session_state.get("X_last"), pd.DataFrame) and st.session_state.get("y_last") is not None:
                 problem = (meta.get("problem_type") or "").lower()
                 if ("reg" in problem) or ("R2" in metrics):
                     y_true = np.asarray(st.session_state["y_last"])
                     y_pred = np.asarray(model.predict(st.session_state["X_last"]))
-                    _mape = safe_mape(y_true, y_pred, zero_policy="skip")
-                    metrics["MAPE"] = None if (isinstance(_mape, float) and np.isnan(_mape)) else float(_mape)
+                    _mape_val = safe_mape(y_true, y_pred, zero_policy="skip")
+                    metrics["MAPE"] = None if (isinstance(_mape_val, float) and np.isnan(_mape_val)) else float(_mape_val)
                     metrics["SMAPE"] = float(smape(y_true, y_pred))
                     st.session_state["metrics"] = metrics
+            _step("[9/9] Doliczono dodatkowe metryki (MAPE/SMAPE – gdy regresja)")
         except Exception:
-            pass
+            _step("[9/9] Pomiń dodatkowe metryki (błąd niekrytyczny)")
 
-        # Log historii
+        # Log historii (czas w Warszawie poprawiany w sekcji Historii)
         try:
             log_run(
                 conn,
@@ -1665,11 +1605,19 @@ if train_btn and tgt_auto:
                 metrics=metrics,
                 run_id=meta.get("run_name", ""),
             )
+            _step("Run zapisany w historii.")
             st.toast("Run zapisany w historii.", icon="✅")
         except Exception as e:
-            st.warning(f"Nie udało się zapisać historii: {e}")
+            _step(f"Nie udało się zapisać historii: {e}")
 
-        s.update(label="Gotowe ✅", state="complete")
+        st_status.update(label="✅ Pipeline zakończony", state="complete")
+
+    # Po statusie – skrót zmian w danych
+    with st.expander("📋 Podsumowanie przetwarzania danych"):
+        prep = st.session_state.get("_prep_info", {})
+        st.json(prep)
+        st.write("**Metryki:**")
+        st.json(st.session_state.get("metrics", {}))
 
 # ==============================
 # 📊 Wyniki + wizualizacje + eksport
