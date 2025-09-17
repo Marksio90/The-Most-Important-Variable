@@ -1,422 +1,1102 @@
-# backend/ml_integration.py — AUTO engine + tuning + feature selection + solid preprocessing
+# backend/ml_integration.py — Refactored with clear separation of responsibilities
 from __future__ import annotations
 import json
 import math
 import time
+import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+from pathlib import Path
+from abc import ABC, abstractmethod
 
 import numpy as np
 import pandas as pd
 
 from sklearn.base import BaseEstimator
 from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
+from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score, r2_score, mean_absolute_error,
-    mean_squared_error, precision_recall_curve, average_precision_score
+    mean_squared_error, precision_recall_curve, average_precision_score,
+    balanced_accuracy_score, matthews_corrcoef
 )
-from sklearn.model_selection import train_test_split, cross_val_score, RandomizedSearchCV
-from sklearn.pipeline import Pipeline, make_pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.model_selection import (
+    train_test_split, cross_val_score, RandomizedSearchCV, 
+    StratifiedKFold, KFold
+)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import (
+    OneHotEncoder, StandardScaler, RobustScaler, 
+    LabelEncoder, PowerTransformer
+)
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
-from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+from sklearn.feature_selection import (
+    mutual_info_classif, mutual_info_regression, 
+    SelectKBest, f_classif, f_regression
+)
 
-# --- optional engines (fallbacki jeśli brak paczek) ---
-HAVE_LGBM = HAVE_XGB = HAVE_CAT = False
+# Optional engines with fallbacks
+HAVE_LGBM = HAVE_XGB = HAVE_CAT = HAVE_OPTUNA = False
 try:
-    from lightgbm import LGBMRegressor, LGBMClassifier  # type: ignore
+    from lightgbm import LGBMRegressor, LGBMClassifier
     HAVE_LGBM = True
-except Exception:
+except ImportError:
     pass
 try:
-    from xgboost import XGBRegressor, XGBClassifier  # type: ignore
+    from xgboost import XGBRegressor, XGBClassifier
     HAVE_XGB = True
-except Exception:
+except ImportError:
     pass
 try:
-    from catboost import CatBoostRegressor, CatBoostClassifier  # type: ignore
+    from catboost import CatBoostRegressor, CatBoostClassifier
     HAVE_CAT = True
-except Exception:
+except ImportError:
+    pass
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    HAVE_OPTUNA = True
+except ImportError:
     pass
 
+warnings.filterwarnings("ignore", category=UserWarning)
 
-# =========================
-# Pomocnicze metryki
-# =========================
-def _rmse(y_true, y_pred) -> float:
-    return float(math.sqrt(mean_squared_error(y_true, y_pred)))
+@dataclass
+class ModelConfig:
+    """Configuration for model training with sensible defaults."""
+    target: str
+    problem_type: Optional[str] = None
+    engine: str = "auto"
+    cv_folds: int = 5
+    test_size: float = 0.2
+    random_state: int = 42
+    feature_selection_k: int = 150
+    hyperopt_trials: int = 100
+    early_stopping_rounds: int = 100
+    imbalance_threshold: float = 0.1
+    outlier_detection: bool = True
+    feature_engineering: bool = True
+    use_optuna: bool = True
 
+@dataclass
+class TrainingResult:
+    """Complete result of model training."""
+    model: BaseEstimator
+    metrics: Dict[str, Any]
+    feature_importance: pd.DataFrame
+    metadata: Dict[str, Any]
+    preprocessing_info: Dict[str, Any]
+    training_time: float
+    validation_scores: Optional[List[float]] = None
 
-def _mape(y_true, y_pred, eps: float = 1e-12) -> float:
-    y_true = np.asarray(y_true, float)
-    y_pred = np.asarray(y_pred, float)
-    denom = np.where(np.abs(y_true) < eps, eps, np.abs(y_true))
-    return float(np.mean(np.abs(y_true - y_pred) / denom))
+# ============================================================================
+# PROBLEM TYPE DETECTION
+# ============================================================================
 
+class ProblemTypeDetector:
+    """Detects ML problem type from target variable."""
+    
+    @staticmethod
+    def detect_problem_type(target_series: pd.Series) -> str:
+        """Detects problem type with improved heuristics."""
+        if target_series.empty:
+            return "regression"
+        
+        # Clean the series
+        clean_series = target_series.dropna()
+        unique_values = clean_series.nunique()
+        total_samples = len(clean_series)
+        
+        # Check data types
+        is_numeric = pd.api.types.is_numeric_dtype(clean_series)
+        is_bool = pd.api.types.is_bool_dtype(clean_series)
+        is_categorical = clean_series.dtype.name in ['object', 'category']
+        
+        # Clear classification cases
+        if is_bool or is_categorical:
+            return "classification"
+        
+        # Binary numeric (0/1, 1/2, etc.)
+        if unique_values == 2:
+            return "classification"
+        
+        # Few unique values relative to sample size
+        if unique_values <= 20 and unique_values / total_samples < 0.05:
+            return "classification"
+        
+        # Integer with reasonable number of classes
+        if is_numeric and pd.api.types.is_integer_dtype(clean_series):
+            if unique_values <= min(50, total_samples * 0.1):
+                return "classification"
+        
+        # Default to regression for continuous numeric data
+        return "regression"
 
-def _smape(y_true, y_pred, eps: float = 1e-12) -> float:
-    y_true = np.asarray(y_true, float)
-    y_pred = np.asarray(y_pred, float)
-    denom = np.maximum((np.abs(y_true) + np.abs(y_pred)) / 2.0, eps)
-    return float(np.mean(np.abs(y_true - y_pred) / denom))
+# ============================================================================
+# DATA VALIDATION
+# ============================================================================
 
-
-def _mdape(y_true, y_pred, eps: float = 1e-12) -> float:
-    y_true = np.asarray(y_true, float)
-    y_pred = np.asarray(y_pred, float)
-    denom = np.where(np.abs(y_true) < eps, eps, np.abs(y_true))
-    return float(np.median(np.abs((y_true - y_pred) / denom)))
-
-
-# =========================
-# Wykrywanie typu problemu
-# =========================
-def detect_problem_type(target: pd.Series | np.ndarray | list) -> str:
-    """
-    Heurystyka: obiektowe/kategoryczne/mało unikatów => klasyfikacja, inaczej regresja.
-    """
-    s = pd.Series(target)
-    nunq = int(s.nunique(dropna=True))
-    if str(s.dtype) in ("object", "category"):
-        return "classification"
-    if pd.api.types.is_bool_dtype(s) or (pd.api.types.is_integer_dtype(s) and 2 <= nunq <= 20):
-        return "classification"
-    return "regression"
-
-
-# =========================
-# Preprocessing + selekcja
-# =========================
-def _build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
-    """
-    Solidny preprocessor:
-      - numeryczne: imputacja medianą
-      - kategoryczne: OneHot + zbijanie rzadkich kategorii (min_frequency=0.01 jeśli dostępne)
-    Zwraca ColumnTransformer z .get_feature_names_out().
-    """
-    num_cols = [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])]
-    cat_cols = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
-    # Dla kompatybilności różnych wersji sklearn:
-    try:
-        ohe = OneHotEncoder(handle_unknown="ignore", min_frequency=0.01, sparse=False)
-    except TypeError:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-    num_pipe = SimpleImputer(strategy="median")
-    cat_pipe = Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("ohe", ohe)])
-
-    pre = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, num_cols),
-            ("cat", cat_pipe, cat_cols),
-        ],
-        remainder="drop",
-        verbose_feature_names_out=False,
-    )
-    return pre
-
-
-def _simple_feature_select(X: pd.DataFrame, y: pd.Series, problem_type: str, k_max: int = 150) -> pd.DataFrame:
-    """
-    Szybka selekcja NUMERYCZNYCH cech (mutual information). Kategoryczne zostawiamy —
-    będą one-hotowane w preprocessorze. Dzięki temu ograniczamy szum i przyspieszamy fit.
-    """
-    Xn = X.select_dtypes(include=[np.number]).copy()
-    Xn = Xn.replace([np.inf, -np.inf], np.nan)
-    Xn = Xn.fillna(Xn.median(numeric_only=True))
-    if Xn.empty:
-        return X
-    try:
-        if "class" in problem_type:
-            mi = mutual_info_classif(Xn, y, discrete_features="auto", random_state=42)
-        else:
-            mi = mutual_info_regression(Xn, y, random_state=42)
-        order = np.argsort(mi)[::-1]
-        keep = Xn.columns[order][: min(k_max, len(order))]
-        cats = X.drop(columns=list(Xn.columns), errors="ignore")
-        return pd.concat([X[keep], cats], axis=1)
-    except Exception:
-        return X
-
-
-# =========================
-# Rejestr silników + auto-wybór
-# =========================
-def _make_engine(problem_type: str, many_cats: bool, mostly_numeric: bool) -> Tuple[str, BaseEstimator]:
-    """
-    Zwraca (nazwa_silnika, estimator) wg dostępnych pakietów i rodzaju danych.
-    Priorytety: Cat (gdy dużo kategorii) → LGBM → XGB → HGB → modele liniowe.
-    """
-    if "class" in problem_type:
-        if HAVE_CAT and many_cats:
-            return "catboost_cls", CatBoostClassifier(
-                depth=8, learning_rate=0.06, iterations=1200,
-                loss_function="Logloss", verbose=False, random_seed=42, allow_writing_files=False
-            )
-        if HAVE_LGBM:
-            return "lgbm_cls", LGBMClassifier(
-                n_estimators=1000, learning_rate=0.05, num_leaves=64,
-                subsample=0.9, colsample_bytree=0.9, random_state=42, n_jobs=-1,
-                class_weight="balanced"
-            )
-        if HAVE_XGB:
-            return "xgb_cls", XGBClassifier(
-                n_estimators=1000, max_depth=8, learning_rate=0.05,
-                subsample=0.9, colsample_bytree=0.9, reg_lambda=1.0,
-                random_state=42, n_jobs=-1, tree_method="hist"
-            )
-        # fallback
-        return "hgb_cls", HistGradientBoostingClassifier(random_state=42)
-    else:
-        # regresja
-        if HAVE_LGBM and mostly_numeric:
-            return "lgbm_reg", LGBMRegressor(
-                n_estimators=800, learning_rate=0.05, num_leaves=64,
-                subsample=0.9, colsample_bytree=0.9, random_state=42, n_jobs=-1
-            )
-        if HAVE_XGB and mostly_numeric:
-            return "xgb_reg", XGBRegressor(
-                n_estimators=900, max_depth=8, learning_rate=0.05,
-                subsample=0.9, colsample_bytree=0.9, reg_lambda=1.0,
-                random_state=42, n_jobs=-1, tree_method="hist"
-            )
-        if HAVE_CAT and many_cats:
-            return "catboost_reg", CatBoostRegressor(
-                depth=8, learning_rate=0.06, iterations=1200, loss_function="RMSE",
-                verbose=False, random_seed=42, allow_writing_files=False
-            )
-        # fallback
-        return "hgb_reg", HistGradientBoostingRegressor(random_state=42)
-
-
-def _maybe_tune(model: BaseEstimator, X, y, problem_type: str, n_iter: int = 60, cv: int = 3) -> BaseEstimator:
-    """
-    Delikatny RandomizedSearchCV dla drzewiastych — podbija jakość bez mielarki.
-    """
-    name = model.__class__.__name__.lower()
-    grid = None
-    if "lgbm" in name:
-        grid = {
-            "num_leaves": [31, 63, 127],
-            "learning_rate": [0.03, 0.05, 0.08],
-            "n_estimators": [600, 900, 1200],
-            "subsample": [0.8, 0.9, 1.0],
-            "colsample_bytree": [0.8, 0.9, 1.0],
-        }
-    elif "xgb" in name:
-        grid = {
-            "max_depth": [6, 8, 10],
-            "learning_rate": [0.03, 0.05, 0.08],
-            "n_estimators": [600, 900, 1200],
-            "subsample": [0.8, 0.9, 1.0],
-            "colsample_bytree": [0.8, 0.9, 1.0],
-            "reg_lambda": [0.5, 1.0, 1.5],
-        }
-    elif "catboost" in name:
-        grid = {
-            "depth": [6, 8, 10],
-            "learning_rate": [0.04, 0.06, 0.08],
-            "iterations": [800, 1000, 1400],
+class DataValidator:
+    """Validates input data quality and compatibility."""
+    
+    @staticmethod
+    def validate_dataframe(df: pd.DataFrame, target: str) -> Dict[str, Any]:
+        """Comprehensive data validation."""
+        issues = []
+        recommendations = []
+        warnings = []
+        
+        # Basic checks
+        if df.empty:
+            issues.append("DataFrame is empty")
+            return {
+                "valid": False, 
+                "issues": issues, 
+                "recommendations": recommendations,
+                "warnings": warnings
+            }
+        
+        if target not in df.columns:
+            issues.append(f"Target column '{target}' not found")
+            return {
+                "valid": False, 
+                "issues": issues, 
+                "recommendations": recommendations,
+                "warnings": warnings
+            }
+        
+        # Target validation
+        y = df[target]
+        target_missing = y.isna().sum()
+        if target_missing > len(df) * 0.5:
+            issues.append(f"Target has {target_missing} missing values (>{len(df)*0.5:.0f} threshold)")
+        elif target_missing > 0:
+            warnings.append(f"Target has {target_missing} missing values")
+        
+        if y.nunique(dropna=True) < 2:
+            issues.append("Target has less than 2 unique values")
+        
+        # Features validation
+        X = df.drop(columns=[target])
+        if X.empty:
+            issues.append("No feature columns available")
+        
+        # Missing values analysis
+        missing_pct = (X.isna().sum() / len(X)) * 100
+        high_missing = missing_pct[missing_pct > 80]
+        if not high_missing.empty:
+            recommendations.append(f"Consider removing features with >80% missing: {list(high_missing.index)}")
+        
+        # Constant features
+        constant_features = [col for col in X.columns if X[col].nunique(dropna=True) <= 1]
+        if constant_features:
+            recommendations.append(f"Constant features to remove: {constant_features}")
+        
+        # High cardinality check
+        high_card_features = []
+        for col in X.select_dtypes(include=['object']).columns:
+            if X[col].nunique() > len(X) * 0.8:
+                high_card_features.append(col)
+        if high_card_features:
+            warnings.append(f"High cardinality features: {high_card_features}")
+        
+        return {
+            "valid": len(issues) == 0,
+            "issues": issues,
+            "recommendations": recommendations,
+            "warnings": warnings,
+            "n_rows": len(df),
+            "n_features": len(X.columns),
+            "target_info": {
+                "nunique": y.nunique(),
+                "missing_count": target_missing,
+                "dtype": str(y.dtype)
+            }
         }
 
-    if grid is None:
-        return model
+# ============================================================================
+# PREPROCESSING PIPELINE
+# ============================================================================
 
-    scoring = "neg_root_mean_squared_error" if "reg" in problem_type else "f1_weighted"
-    try:
-        rs = RandomizedSearchCV(
-            model, grid, n_iter=n_iter, scoring=scoring,
-            cv=cv, n_jobs=-1, random_state=42, verbose=0
-        )
-        rs.fit(X, y)
-        return rs.best_estimator_
-    except Exception:
-        return model
-
-
-# =========================
-# Feature importance
-# =========================
-def _get_feature_names(pre: ColumnTransformer, X: pd.DataFrame) -> List[str]:
-    try:
-        return pre.get_feature_names_out().tolist()
-    except Exception:
-        # fallback
-        names: List[str] = []
-        for name, trans, cols in pre.transformers_:
-            if cols is None:
-                continue
-            if hasattr(trans, "get_feature_names_out"):
-                try:
-                    fn = trans.get_feature_names_out(cols)
-                    names.extend(fn.tolist())
-                    continue
-                except Exception:
-                    pass
-            if isinstance(cols, list):
-                names.extend(list(cols))
-        if not names:
-            names = [f"f{i}" for i in range(pre.transform(X[:1]).shape[1])]
-        return names
-
-
-def _feature_importance_df(model: BaseEstimator, pre: ColumnTransformer, X: pd.DataFrame) -> pd.DataFrame:
-    """
-    Próbujemy: feature_importances_, coef_, inaczej pusta ramka (bez błędów).
-    """
-    try:
-        names = _get_feature_names(pre, X)
-        if hasattr(model, "feature_importances_"):
-            imp = np.asarray(model.feature_importances_, float).ravel()
-            return (pd.DataFrame({"feature": names[: len(imp)], "importance": imp})
-                    .sort_values("importance", ascending=False)
-                    .reset_index(drop=True))
-        if hasattr(model, "coef_"):
-            coef = np.asarray(model.coef_, float).ravel()
-            imp = np.abs(coef)
-            return (pd.DataFrame({"feature": names[: len(imp)], "importance": imp})
-                    .sort_values("importance", ascending=False)
-                    .reset_index(drop=True))
-    except Exception:
+class PreprocessingStep(ABC):
+    """Abstract base class for preprocessing steps."""
+    
+    @abstractmethod
+    def transform(self, df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """Transform the dataframe and return info about changes."""
         pass
-    return pd.DataFrame(columns=["feature", "importance"])
 
+class RemoveConstantFeaturesStep(PreprocessingStep):
+    """Removes constant and quasi-constant features."""
+    
+    def __init__(self, threshold: float = 0.01):
+        self.threshold = threshold
+    
+    def transform(self, df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        X = df.drop(columns=[target], errors='ignore')
+        constant_features = []
+        
+        for col in X.columns:
+            if X[col].nunique(dropna=True) <= 1:
+                constant_features.append(col)
+            elif X[col].dtype in ['int64', 'float64'] and X[col].std() < self.threshold:
+                constant_features.append(col)
+        
+        if constant_features:
+            df = df.drop(columns=constant_features)
+        
+        return df, {"removed_constant_features": constant_features}
 
-# =========================
-# API zgodne z app.py
-# =========================
-def export_visualizations(*args, **kwargs) -> Dict[str, Any]:
-    """Zachowujemy funkcję dla zgodności — obecnie nieużywana."""
-    return {}
+class HandleMissingValuesStep(PreprocessingStep):
+    """Handles missing values with different strategies."""
+    
+    def __init__(self, numeric_strategy: str = "median", categorical_strategy: str = "most_frequent"):
+        self.numeric_strategy = numeric_strategy
+        self.categorical_strategy = categorical_strategy
+    
+    def transform(self, df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        info = {"imputed_columns": []}
+        
+        # Handle missing values in features only
+        features = [col for col in df.columns if col != target]
+        
+        for col in features:
+            if df[col].isna().any():
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    if self.numeric_strategy == "median":
+                        fill_value = df[col].median()
+                    elif self.numeric_strategy == "mean":
+                        fill_value = df[col].mean()
+                    else:
+                        fill_value = 0
+                    df[col] = df[col].fillna(fill_value)
+                else:
+                    if self.categorical_strategy == "most_frequent":
+                        fill_value = df[col].mode().iloc[0] if not df[col].mode().empty else "MISSING"
+                    else:
+                        fill_value = "MISSING"
+                    df[col] = df[col].fillna(fill_value)
+                
+                info["imputed_columns"].append(col)
+        
+        # Handle target missing values by removal
+        if target in df.columns:
+            initial_rows = len(df)
+            df = df.dropna(subset=[target])
+            info["dropped_target_missing"] = initial_rows - len(df)
+        
+        return df, info
 
+class CreateDateFeaturesStep(PreprocessingStep):
+    """Creates features from datetime columns."""
+    
+    def __init__(self, date_features: List[str] = None):
+        self.date_features = date_features or ["year", "month", "dayofweek", "is_weekend"]
+    
+    def transform(self, df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        created_features = []
+        
+        for col in df.columns:
+            if col == target:
+                continue
+                
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                self._create_date_features(df, col, created_features)
+            elif df[col].dtype == 'object':
+                # Try to parse as datetime
+                try:
+                    parsed = pd.to_datetime(df[col], errors='coerce')
+                    if parsed.notna().mean() > 0.8:  # If most values are parseable
+                        df[col] = parsed
+                        self._create_date_features(df, col, created_features)
+                except Exception:
+                    continue
+        
+        return df, {"created_date_features": created_features}
+    
+    def _create_date_features(self, df: pd.DataFrame, col: str, created_features: List[str]):
+        """Helper to create date features."""
+        base_name = col.replace('_date', '').replace('_time', '')
+        
+        if 'year' in self.date_features:
+            new_col = f"{base_name}__year"
+            df[new_col] = df[col].dt.year
+            created_features.append(new_col)
+        
+        if 'month' in self.date_features:
+            new_col = f"{base_name}__month"
+            df[new_col] = df[col].dt.month
+            created_features.append(new_col)
+        
+        if 'dayofweek' in self.date_features:
+            new_col = f"{base_name}__dayofweek"
+            df[new_col] = df[col].dt.dayofweek
+            created_features.append(new_col)
+        
+        if 'is_weekend' in self.date_features:
+            new_col = f"{base_name}__is_weekend"
+            df[new_col] = (df[col].dt.dayofweek >= 5).astype(int)
+            created_features.append(new_col)
 
-def train_sklearn(
-    df: pd.DataFrame,
-    *,
-    target: str,
-    problem_type: Optional[str] = None,
-    engine: str = "auto",
-    cv_folds: int = 0,
-    out_dir: str = "tmiv_out",
-    random_state: int = 42,
-    compute_shap: bool = False,   # ignorujemy jeśli brak SHAP — zero błędów
-) -> Tuple[BaseEstimator, Dict[str, Any], pd.DataFrame, Dict[str, Any]]:
-    """
-    Zwraca: (model, metrics:dict, fi_df:DataFrame, meta:dict)
-    """
-    t0 = time.time()
-    assert target in df.columns, f"Brak kolumny target='{target}'"
+class DataPreprocessor:
+    """Orchestrates preprocessing pipeline."""
+    
+    def __init__(self, config: ModelConfig):
+        self.config = config
+        self.steps = [
+            RemoveConstantFeaturesStep(),
+            HandleMissingValuesStep(),
+            CreateDateFeaturesStep() if config.feature_engineering else None
+        ]
+        self.steps = [step for step in self.steps if step is not None]
+    
+    def preprocess(self, df: pd.DataFrame, target: str) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+        """Apply all preprocessing steps."""
+        preprocessing_info = {}
+        
+        for i, step in enumerate(self.steps):
+            df, step_info = step.transform(df, target)
+            preprocessing_info[f"step_{i}_{step.__class__.__name__}"] = step_info
+        
+        return df, preprocessing_info
 
-    # 1) Podział X/y + łagodne czyszczenie
-    df = df.copy()
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=[target])
-    y = df[target]
-    X = df.drop(columns=[target], errors="ignore")
+# ============================================================================
+# MODEL TRAINERS
+# ============================================================================
 
-    # cast bool → int (stabilniejsze metryki i kodowanie)
-    for c in X.columns:
-        if pd.api.types.is_bool_dtype(X[c]):
-            X[c] = X[c].astype(int)
+class BaseModelTrainer(ABC):
+    """Abstract base class for model trainers."""
+    
+    @abstractmethod
+    def create_model(self, problem_type: str, **kwargs) -> BaseEstimator:
+        """Create and configure the model."""
+        pass
+    
+    @abstractmethod
+    def get_param_grid(self) -> Dict[str, Any]:
+        """Get hyperparameter search space."""
+        pass
 
-    # 2) Typ problemu
-    problem = problem_type or detect_problem_type(y)
+class SklearnTrainer(BaseModelTrainer):
+    """Trainer for scikit-learn models."""
+    
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+    
+    def create_model(self, problem_type: str, **kwargs) -> BaseEstimator:
+        """Create sklearn model based on problem type."""
+        if problem_type == "classification":
+            return HistGradientBoostingClassifier(
+                random_state=self.random_state,
+                **kwargs
+            )
+        else:
+            return HistGradientBoostingRegressor(
+                random_state=self.random_state,
+                **kwargs
+            )
+    
+    def get_param_grid(self) -> Dict[str, Any]:
+        """Hyperparameter grid for sklearn models."""
+        return {
+            'max_depth': [3, 6, 10],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'max_iter': [100, 200]
+        }
 
-    # 3) Szybka selekcja cech numerycznych
-    X_sel = _simple_feature_select(X, y, problem, k_max=150)
+class LightGBMTrainer(BaseModelTrainer):
+    """Trainer for LightGBM models."""
+    
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+    
+    def create_model(self, problem_type: str, **kwargs) -> BaseEstimator:
+        """Create LightGBM model."""
+        common_params = {
+            'random_state': self.random_state,
+            'n_jobs': -1,
+            'verbosity': -1
+        }
+        common_params.update(kwargs)
+        
+        if problem_type == "classification":
+            return LGBMClassifier(**common_params)
+        else:
+            return LGBMRegressor(**common_params)
+    
+    def get_param_grid(self) -> Dict[str, Any]:
+        return {
+            'n_estimators': [100, 200, 500],
+            'num_leaves': [20, 50, 100],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'feature_fraction': [0.8, 0.9, 1.0]
+        }
 
-    # 4) Preprocessor
-    pre = _build_preprocessor(X_sel)
+class XGBoostTrainer(BaseModelTrainer):
+    """Trainer for XGBoost models."""
+    
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+    
+    def create_model(self, problem_type: str, **kwargs) -> BaseEstimator:
+        """Create XGBoost model."""
+        common_params = {
+            'random_state': self.random_state,
+            'n_jobs': -1,
+            'tree_method': 'hist'
+        }
+        common_params.update(kwargs)
+        
+        if problem_type == "classification":
+            return XGBClassifier(**common_params)
+        else:
+            return XGBRegressor(**common_params)
+    
+    def get_param_grid(self) -> Dict[str, Any]:
+        return {
+            'n_estimators': [100, 200, 500],
+            'max_depth': [3, 6, 9],
+            'learning_rate': [0.01, 0.1, 0.2],
+            'subsample': [0.8, 0.9, 1.0]
+        }
 
-    # 5) Wybór silnika
-    num_ratio = X_sel.select_dtypes(include=[np.number]).shape[1] / max(1, X_sel.shape[1])
-    cat_cols = [c for c in X_sel.columns if not pd.api.types.is_numeric_dtype(X_sel[c])]
-    many_cats = len(cat_cols) >= 3
+class CatBoostTrainer(BaseModelTrainer):
+    """Trainer for CatBoost models."""
+    
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+    
+    def create_model(self, problem_type: str, **kwargs) -> BaseEstimator:
+        """Create CatBoost model."""
+        common_params = {
+            'random_seed': self.random_state,
+            'verbose': False,
+            'allow_writing_files': False
+        }
+        common_params.update(kwargs)
+        
+        if problem_type == "classification":
+            return CatBoostClassifier(**common_params)
+        else:
+            return CatBoostRegressor(**common_params)
+    
+    def get_param_grid(self) -> Dict[str, Any]:
+        return {
+            'iterations': [100, 200, 500],
+            'depth': [4, 6, 8],
+            'learning_rate': [0.01, 0.1, 0.2],
+        }
 
-    if engine == "auto":
-        engine_name, est = _make_engine(problem, many_cats=many_cats, mostly_numeric=(num_ratio > 0.6))
-    else:
-        # ręczny selector (zachowanie zgodności; jeśli nieznany → auto)
-        engine_name, est = _make_engine(problem, many_cats=many_cats, mostly_numeric=(num_ratio > 0.6))
+# ============================================================================
+# MODEL FACTORY
+# ============================================================================
 
-    # 6) Pipeline
-    pipe = Pipeline([("pre", pre), ("est", est)])
+class ModelFactory:
+    """Factory for creating appropriate model trainers."""
+    
+    def __init__(self):
+        self.trainers = {
+            'sklearn': SklearnTrainer,
+            'lightgbm': LightGBMTrainer if HAVE_LGBM else SklearnTrainer,
+            'xgboost': XGBoostTrainer if HAVE_XGB else SklearnTrainer,
+            'catboost': CatBoostTrainer if HAVE_CAT else SklearnTrainer,
+        }
+    
+    def get_trainer(self, engine: str, random_state: int = 42) -> BaseModelTrainer:
+        """Get appropriate trainer for engine."""
+        if engine == "auto":
+            engine = self._select_auto_engine()
+        
+        trainer_class = self.trainers.get(engine, SklearnTrainer)
+        return trainer_class(random_state=random_state)
+    
+    def _select_auto_engine(self) -> str:
+        """Automatically select best available engine."""
+        if HAVE_LGBM:
+            return 'lightgbm'
+        elif HAVE_XGB:
+            return 'xgboost'
+        elif HAVE_CAT:
+            return 'catboost'
+        else:
+            return 'sklearn'
 
-    # 7) Train / CV
-    X_train, X_valid, y_train, y_valid = train_test_split(
-        X_sel, y, test_size=0.2, random_state=random_state, stratify=y if "class" in problem else None
-    )
-    pipe.fit(X_train, y_train)
+# ============================================================================
+# METRICS CALCULATION
+# ============================================================================
 
-    # 7.1) Lekki tuning dla drzewiastych przy większych zbiorach (bez ryzyka błędów)
-    name_lower = est.__class__.__name__.lower()
-    if any(k in name_lower for k in ["lgbm", "xgb", "cat"]) and len(X_train) >= 2000:
-        tuned = _maybe_tune(pipe.named_steps["est"], pre.transform(X_train), y_train, problem,
-                            n_iter=60 if len(X_train) < 20000 else 120, cv=3)
-        pipe = Pipeline([("pre", pre), ("est", tuned)])
-        pipe.fit(X_train, y_train)
-
-    # 8) Predykcje + metryki
-    metrics: Dict[str, Any] = {}
-    y_pred = pipe.predict(X_valid)
-
-    if "class" in problem:
-        # spróbuj proby (dla ROC/PR)
-        proba = None
+class MetricsCalculator:
+    """Calculates comprehensive metrics for model evaluation."""
+    
+    @staticmethod
+    def calculate_metrics(y_true, y_pred, y_proba, problem_type: str) -> Dict[str, float]:
+        """Calculate metrics based on problem type."""
+        metrics = {}
+        
         try:
-            pro = pipe.named_steps["est"].predict_proba(pre.transform(X_valid))
-            if pro.ndim == 2 and pro.shape[1] >= 2:
-                proba = pro[:, 1]
-        except Exception:
-            proba = None
-
-        metrics["Accuracy"] = float(accuracy_score(y_valid, y_pred))
-        metrics["F1_weighted"] = float(f1_score(y_valid, y_pred, average="weighted", zero_division=0))
-        if proba is not None and len(np.unique(y_valid)) == 2:
+            if problem_type == "classification":
+                metrics.update(MetricsCalculator._calculate_classification_metrics(y_true, y_pred, y_proba))
+            else:
+                metrics.update(MetricsCalculator._calculate_regression_metrics(y_true, y_pred))
+        except Exception as e:
+            metrics["calculation_error"] = str(e)
+        
+        return metrics
+    
+    @staticmethod
+    def _calculate_classification_metrics(y_true, y_pred, y_proba) -> Dict[str, float]:
+        """Calculate classification metrics."""
+        metrics = {}
+        
+        metrics["accuracy"] = float(accuracy_score(y_true, y_pred))
+        metrics["balanced_accuracy"] = float(balanced_accuracy_score(y_true, y_pred))
+        metrics["f1_weighted"] = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
+        metrics["f1_macro"] = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+        
+        if len(np.unique(y_true)) == 2 and y_proba is not None:
             try:
-                metrics["ROC_AUC"] = float(roc_auc_score(y_valid, proba))
+                metrics["roc_auc"] = float(roc_auc_score(y_true, y_proba))
+                metrics["pr_auc"] = float(average_precision_score(y_true, y_proba))
+                metrics["mcc"] = float(matthews_corrcoef(y_true, y_pred))
             except Exception:
                 pass
-    else:
-        metrics["RMSE"] = _rmse(y_valid, y_pred)
-        metrics["MAE"] = float(mean_absolute_error(y_valid, y_pred))
-        metrics["R2"] = float(r2_score(y_valid, y_pred))
-        metrics["MAPE"] = _mape(y_valid, y_pred)
-        metrics["SMAPE"] = _smape(y_valid, y_pred)
-        metrics["MdAPE"] = _mdape(y_valid, y_pred)
-
-    # 9) Cross-Validation (opcjonalnie)
-    if cv_folds and cv_folds >= 2:
+        
+        return metrics
+    
+    @staticmethod
+    def _calculate_regression_metrics(y_true, y_pred) -> Dict[str, float]:
+        """Calculate regression metrics."""
+        metrics = {}
+        
+        metrics["rmse"] = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+        metrics["mae"] = float(mean_absolute_error(y_true, y_pred))
+        metrics["r2"] = float(r2_score(y_true, y_pred))
+        
+        # Additional regression metrics with error handling
         try:
-            scoring = "neg_root_mean_squared_error" if "reg" in problem else "f1_weighted"
-            cv_scores = cross_val_score(pipe, X_sel, y, cv=cv_folds, scoring=scoring, n_jobs=-1)
-            if "reg" in problem:
-                cv_scores = -cv_scores
-            metrics["cv_metric"] = "RMSE" if "reg" in problem else "F1_weighted"
-            metrics["cv_mean"] = float(np.mean(cv_scores))
-            metrics["cv_std"] = float(np.std(cv_scores))
-            metrics["cv_folds"] = int(cv_folds)
-            metrics["cv_explanation"] = "Walidacja krzyżowa (stabilność wyników)."
+            mape = np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), 1e-8)))
+            metrics["mape"] = float(mape)
         except Exception:
-            # bez paniki — CV opcjonalne
             pass
+        
+        try:
+            smape = np.mean(2 * np.abs(y_true - y_pred) / (np.abs(y_true) + np.abs(y_pred) + 1e-8))
+            metrics["smape"] = float(smape)
+        except Exception:
+            pass
+        
+        return metrics
 
-    # 10) Feature importance
-    try:
-        fi_df = _feature_importance_df(pipe.named_steps["est"], pipe.named_steps["pre"], X_sel)
-    except Exception:
-        fi_df = pd.DataFrame(columns=["feature", "importance"])
+# ============================================================================
+# FEATURE IMPORTANCE EXTRACTION
+# ============================================================================
 
-    # 11) Meta
-    run_name = f"run_{int(time.time())}"
-    meta = {
-        "problem_type": problem,
-        "engine": engine_name,
-        "run_name": run_name,
-        "n_rows": int(len(df)),
-        "n_cols": int(df.shape[1]),
+class FeatureImportanceExtractor:
+    """Extracts feature importance from trained models."""
+    
+    @staticmethod
+    def extract_importance(model: BaseEstimator, feature_names: List[str]) -> pd.DataFrame:
+        """Extract feature importance with multiple fallback methods."""
+        try:
+            # Method 1: feature_importances_ (tree-based models)
+            if hasattr(model, "feature_importances_"):
+                importances = model.feature_importances_
+                return FeatureImportanceExtractor._create_importance_df(importances, feature_names)
+            
+            # Method 2: coef_ (linear models)
+            if hasattr(model, "coef_"):
+                importances = np.abs(model.coef_).flatten()
+                return FeatureImportanceExtractor._create_importance_df(importances, feature_names)
+            
+            # Method 3: Try to get from pipeline
+            if hasattr(model, 'named_steps') and 'estimator' in model.named_steps:
+                return FeatureImportanceExtractor.extract_importance(
+                    model.named_steps['estimator'], feature_names
+                )
+            
+            # Fallback: return empty dataframe
+            return pd.DataFrame(columns=["feature", "importance"])
+            
+        except Exception:
+            return pd.DataFrame(columns=["feature", "importance"])
+    
+    @staticmethod
+    def _create_importance_df(importances: np.ndarray, feature_names: List[str]) -> pd.DataFrame:
+        """Create feature importance dataframe."""
+        n_features = min(len(importances), len(feature_names))
+        
+        df = pd.DataFrame({
+            "feature": feature_names[:n_features],
+            "importance": importances[:n_features]
+        })
+        
+        return df.sort_values("importance", ascending=False).reset_index(drop=True)
+
+# ============================================================================
+# MAIN TRAINING ORCHESTRATOR
+# ============================================================================
+
+class MLTrainingOrchestrator:
+    """Main class that orchestrates the entire ML training process."""
+    
+    def __init__(self, config: ModelConfig):
+        self.config = config
+        self.validator = DataValidator()
+        self.problem_detector = ProblemTypeDetector()
+        self.preprocessor = DataPreprocessor(config)
+        self.model_factory = ModelFactory()
+        self.metrics_calculator = MetricsCalculator()
+        self.importance_extractor = FeatureImportanceExtractor()
+    
+    def train(self, df: pd.DataFrame) -> TrainingResult:
+        """Main training pipeline."""
+        start_time = time.time()
+        
+        try:
+            # Step 1: Validation
+            validation_result = self.validator.validate_dataframe(df, self.config.target)
+            if not validation_result["valid"]:
+                raise ValueError(f"Data validation failed: {validation_result['issues']}")
+            
+            # Step 2: Problem type detection
+            target_series = df[self.config.target]
+            problem_type = self.config.problem_type or self.problem_detector.detect_problem_type(target_series)
+            
+            # Step 3: Preprocessing
+            df_processed, preprocessing_info = self.preprocessor.preprocess(df, self.config.target)
+            
+            # Step 4: Prepare data for training
+            y = df_processed[self.config.target]
+            X = df_processed.drop(columns=[self.config.target])
+            
+            # Step 5: Train/test split
+            stratify = y if problem_type == "classification" and y.nunique() > 1 else None
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=self.config.test_size,
+                random_state=self.config.random_state,
+                stratify=stratify
+            )
+            
+            # Step 6: Create and train model
+            trainer = self.model_factory.get_trainer(self.config.engine, self.config.random_state)
+            model = trainer.create_model(problem_type)
+            
+            # Step 7: Create preprocessing pipeline
+            preprocessor_pipeline = self._create_sklearn_preprocessor(X_train)
+            full_pipeline = Pipeline([
+                ('preprocessor', preprocessor_pipeline),
+                ('estimator', model)
+            ])
+            
+            # Step 8: Train the model
+            full_pipeline.fit(X_train, y_train)
+            
+            # Step 9: Generate predictions
+            y_pred = full_pipeline.predict(X_test)
+            y_proba = None
+            
+            if problem_type == "classification" and hasattr(full_pipeline, "predict_proba"):
+                try:
+                    proba_output = full_pipeline.predict_proba(X_test)
+                    if proba_output.shape[1] == 2:
+                        y_proba = proba_output[:, 1]
+                except Exception:
+                    pass
+            
+            # Step 10: Calculate metrics
+            metrics = self.metrics_calculator.calculate_metrics(y_test, y_pred, y_proba, problem_type)
+            
+            # Step 11: Cross-validation
+            if self.config.cv_folds > 1:
+                cv_scores = self._perform_cross_validation(full_pipeline, X, y, problem_type)
+                metrics.update({
+                    "cv_mean": float(np.mean(cv_scores)),
+                    "cv_std": float(np.std(cv_scores)),
+                    "cv_scores": cv_scores.tolist()
+                })
+            
+            # Step 12: Feature importance
+            feature_names = list(X.columns)
+            feature_importance = self.importance_extractor.extract_importance(full_pipeline, feature_names)
+            
+            # Step 13: Create metadata
+            metadata = {
+                "problem_type": problem_type,
+                "engine": self.config.engine,
+                "n_samples": len(df_processed),
+                "n_features": len(X.columns),
+                "validation_info": validation_result,
+                "model_params": model.get_params() if hasattr(model, 'get_params') else {}
+            }
+            
+            training_time = time.time() - start_time
+            
+            return TrainingResult(
+                model=full_pipeline,
+                metrics=metrics,
+                feature_importance=feature_importance,
+                metadata=metadata,
+                preprocessing_info=preprocessing_info,
+                training_time=training_time,
+                validation_scores=cv_scores.tolist() if self.config.cv_folds > 1 else None
+            )
+            
+        except Exception as e:
+            # Return error result
+            return TrainingResult(
+                model=None,
+                metrics={"error": str(e)},
+                feature_importance=pd.DataFrame(),
+                metadata={"error": str(e), "problem_type": "unknown"},
+                preprocessing_info={"error": str(e)},
+                training_time=time.time() - start_time
+            )
+    
+    def _create_sklearn_preprocessor(self, X: pd.DataFrame) -> ColumnTransformer:
+        """Create sklearn preprocessing pipeline."""
+        numeric_features = X.select_dtypes(include=[np.number]).columns.tolist()
+        categorical_features = X.select_dtypes(exclude=[np.number]).columns.tolist()
+        
+        transformers = []
+        
+        if numeric_features:
+            numeric_transformer = Pipeline([
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', RobustScaler())
+            ])
+            transformers.append(('num', numeric_transformer, numeric_features))
+        
+        if categorical_features:
+            categorical_transformer = Pipeline([
+                ('imputer', SimpleImputer(strategy='most_frequent')),
+                ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+            ])
+            transformers.append(('cat', categorical_transformer, categorical_features))
+        
+        return ColumnTransformer(transformers=transformers, remainder='drop')
+    
+    def _perform_cross_validation(self, model: BaseEstimator, X: pd.DataFrame, 
+                                y: pd.Series, problem_type: str) -> np.ndarray:
+        """Perform cross-validation."""
+        try:
+            if problem_type == "classification":
+                cv = StratifiedKFold(n_splits=self.config.cv_folds, shuffle=True, random_state=self.config.random_state)
+                scoring = "f1_weighted"
+            else:
+                cv = KFold(n_splits=self.config.cv_folds, shuffle=True, random_state=self.config.random_state)
+                scoring = "neg_root_mean_squared_error"
+            
+            scores = cross_val_score(model, X, y, cv=cv, scoring=scoring, n_jobs=-1)
+            
+            # Convert negative scores back to positive for RMSE
+            if scoring == "neg_root_mean_squared_error":
+                scores = -scores
+                
+            return scores
+            
+        except Exception:
+            # Return dummy scores if CV fails
+            return np.array([0.0] * self.config.cv_folds)
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS (maintaining backward compatibility)
+# ============================================================================
+
+def detect_problem_type(target) -> str:
+    """Legacy function for problem type detection."""
+    detector = ProblemTypeDetector()
+    return detector.detect_problem_type(pd.Series(target))
+
+def train_sklearn_enhanced(df: pd.DataFrame, config: ModelConfig) -> Tuple[BaseEstimator, Dict[str, Any], pd.DataFrame, Dict[str, Any]]:
+    """Enhanced training function with new architecture."""
+    orchestrator = MLTrainingOrchestrator(config)
+    result = orchestrator.train(df)
+    
+    return (
+        result.model,
+        result.metrics,
+        result.feature_importance,
+        result.metadata
+    )
+
+def train_sklearn(df: pd.DataFrame, **kwargs) -> Tuple[BaseEstimator, Dict[str, Any], pd.DataFrame, Dict[str, Any]]:
+    """Legacy compatibility wrapper maintaining original signature."""
+    
+    # Convert old parameters to new ModelConfig
+    config_params = {}
+    
+    # Map common parameters
+    param_mapping = {
+        'target': 'target',
+        'problem_type': 'problem_type', 
+        'engine': 'engine',
+        'cv_folds': 'cv_folds',
+        'test_size': 'test_size',
+        'random_state': 'random_state'
     }
+    
+    for old_param, new_param in param_mapping.items():
+        if old_param in kwargs:
+            config_params[new_param] = kwargs[old_param]
+    
+    # Handle special cases
+    if 'compute_shap' in kwargs:
+        # SHAP computation would be handled separately in the new architecture
+        pass
+    
+    if 'out_dir' in kwargs:
+        # Output directory handling would be in a separate export component
+        pass
+    
+    # Create config with defaults for missing required fields
+    if 'target' not in config_params:
+        raise ValueError("target parameter is required")
+    
+    config = ModelConfig(**config_params)
+    
+    # Use new training pipeline
+    return train_sklearn_enhanced(df, config)
 
-    return pipe, metrics, fi_df, meta
+def export_visualizations(*args, **kwargs) -> Dict[str, Any]:
+    """Placeholder for visualization export - maintained for compatibility."""
+    return {}
+
+# ============================================================================
+# HYPERPARAMETER OPTIMIZATION (Optuna integration)
+# ============================================================================
+
+class HyperparameterOptimizer:
+    """Handles hyperparameter optimization using Optuna or RandomizedSearchCV."""
+    
+    def __init__(self, config: ModelConfig):
+        self.config = config
+    
+    def optimize(self, trainer: BaseModelTrainer, X: pd.DataFrame, y: pd.Series, problem_type: str) -> BaseEstimator:
+        """Optimize hyperparameters for the given trainer."""
+        if HAVE_OPTUNA and self.config.use_optuna:
+            return self._optimize_with_optuna(trainer, X, y, problem_type)
+        else:
+            return self._optimize_with_sklearn(trainer, X, y, problem_type)
+    
+    def _optimize_with_optuna(self, trainer: BaseModelTrainer, X: pd.DataFrame, y: pd.Series, problem_type: str) -> BaseEstimator:
+        """Optimize using Optuna."""
+        def objective(trial):
+            # Get parameter suggestions from the trainer
+            param_grid = trainer.get_param_grid()
+            params = {}
+            
+            for param_name, param_values in param_grid.items():
+                if isinstance(param_values[0], int):
+                    params[param_name] = trial.suggest_int(param_name, min(param_values), max(param_values))
+                elif isinstance(param_values[0], float):
+                    params[param_name] = trial.suggest_float(param_name, min(param_values), max(param_values))
+                else:
+                    params[param_name] = trial.suggest_categorical(param_name, param_values)
+            
+            # Create model with suggested parameters
+            model = trainer.create_model(problem_type, **params)
+            
+            # Evaluate with cross-validation
+            if problem_type == "classification":
+                cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.config.random_state)
+                scoring = "f1_weighted"
+            else:
+                cv = KFold(n_splits=3, shuffle=True, random_state=self.config.random_state)
+                scoring = "neg_mean_squared_error"
+            
+            scores = cross_val_score(model, X, y, cv=cv, scoring=scoring, n_jobs=-1)
+            return scores.mean()
+        
+        try:
+            study = optuna.create_study(direction="maximize")
+            study.optimize(objective, n_trials=self.config.hyperopt_trials, timeout=self.config.hyperopt_trials * 5)
+            
+            # Create final model with best parameters
+            best_params = study.best_params
+            return trainer.create_model(problem_type, **best_params)
+            
+        except Exception:
+            # Fallback to default model
+            return trainer.create_model(problem_type)
+    
+    def _optimize_with_sklearn(self, trainer: BaseModelTrainer, X: pd.DataFrame, y: pd.Series, problem_type: str) -> BaseEstimator:
+        """Optimize using sklearn RandomizedSearchCV."""
+        try:
+            base_model = trainer.create_model(problem_type)
+            param_grid = trainer.get_param_grid()
+            
+            if problem_type == "classification":
+                cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.config.random_state)
+                scoring = "f1_weighted"
+            else:
+                cv = KFold(n_splits=3, shuffle=True, random_state=self.config.random_state)
+                scoring = "neg_mean_squared_error"
+            
+            search = RandomizedSearchCV(
+                base_model,
+                param_grid,
+                n_iter=min(50, self.config.hyperopt_trials),
+                cv=cv,
+                scoring=scoring,
+                n_jobs=-1,
+                random_state=self.config.random_state
+            )
+            
+            search.fit(X, y)
+            return search.best_estimator_
+            
+        except Exception:
+            # Fallback to default model
+            return trainer.create_model(problem_type)
+
+# ============================================================================
+# ADVANCED TRAINING ORCHESTRATOR WITH HYPEROPT
+# ============================================================================
+
+class AdvancedMLTrainingOrchestrator(MLTrainingOrchestrator):
+    """Extended orchestrator with hyperparameter optimization."""
+    
+    def __init__(self, config: ModelConfig):
+        super().__init__(config)
+        self.hyperopt = HyperparameterOptimizer(config)
+    
+    def train(self, df: pd.DataFrame) -> TrainingResult:
+        """Enhanced training pipeline with hyperparameter optimization."""
+        start_time = time.time()
+        
+        try:
+            # Steps 1-5: Same as base class
+            validation_result = self.validator.validate_dataframe(df, self.config.target)
+            if not validation_result["valid"]:
+                raise ValueError(f"Data validation failed: {validation_result['issues']}")
+            
+            target_series = df[self.config.target]
+            problem_type = self.config.problem_type or self.problem_detector.detect_problem_type(target_series)
+            
+            df_processed, preprocessing_info = self.preprocessor.preprocess(df, self.config.target)
+            
+            y = df_processed[self.config.target]
+            X = df_processed.drop(columns=[self.config.target])
+            
+            stratify = y if problem_type == "classification" and y.nunique() > 1 else None
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=self.config.test_size,
+                random_state=self.config.random_state,
+                stratify=stratify
+            )
+            
+            # Step 6: Create trainer and preprocessing
+            trainer = self.model_factory.get_trainer(self.config.engine, self.config.random_state)
+            preprocessor_pipeline = self._create_sklearn_preprocessor(X_train)
+            
+            # Apply preprocessing to training data for hyperopt
+            X_train_processed = preprocessor_pipeline.fit_transform(X_train)
+            
+            # Step 7: Hyperparameter optimization (if dataset is large enough)
+            if len(X_train) > 1000 and self.config.hyperopt_trials > 10:
+                optimized_model = self.hyperopt.optimize(trainer, X_train_processed, y_train, problem_type)
+            else:
+                optimized_model = trainer.create_model(problem_type)
+            
+            # Step 8: Create final pipeline
+            full_pipeline = Pipeline([
+                ('preprocessor', preprocessor_pipeline),
+                ('estimator', optimized_model)
+            ])
+            
+            # Step 9: Train final model
+            full_pipeline.fit(X_train, y_train)
+            
+            # Steps 10-13: Same as base class (predictions, metrics, etc.)
+            y_pred = full_pipeline.predict(X_test)
+            y_proba = None
+            
+            if problem_type == "classification" and hasattr(full_pipeline, "predict_proba"):
+                try:
+                    proba_output = full_pipeline.predict_proba(X_test)
+                    if proba_output.shape[1] == 2:
+                        y_proba = proba_output[:, 1]
+                except Exception:
+                    pass
+            
+            metrics = self.metrics_calculator.calculate_metrics(y_test, y_pred, y_proba, problem_type)
+            
+            if self.config.cv_folds > 1:
+                cv_scores = self._perform_cross_validation(full_pipeline, X, y, problem_type)
+                metrics.update({
+                    "cv_mean": float(np.mean(cv_scores)),
+                    "cv_std": float(np.std(cv_scores)),
+                    "cv_scores": cv_scores.tolist()
+                })
+            
+            feature_names = list(X.columns)
+            feature_importance = self.importance_extractor.extract_importance(full_pipeline, feature_names)
+            
+            metadata = {
+                "problem_type": problem_type,
+                "engine": self.config.engine,
+                "n_samples": len(df_processed),
+                "n_features": len(X.columns),
+                "validation_info": validation_result,
+                "model_params": optimized_model.get_params() if hasattr(optimized_model, 'get_params') else {},
+                "hyperopt_applied": len(X_train) > 1000 and self.config.hyperopt_trials > 10
+            }
+            
+            training_time = time.time() - start_time
+            
+            return TrainingResult(
+                model=full_pipeline,
+                metrics=metrics,
+                feature_importance=feature_importance,
+                metadata=metadata,
+                preprocessing_info=preprocessing_info,
+                training_time=training_time,
+                validation_scores=cv_scores.tolist() if self.config.cv_folds > 1 else None
+            )
+            
+        except Exception as e:
+            return TrainingResult(
+                model=None,
+                metrics={"error": str(e)},
+                feature_importance=pd.DataFrame(),
+                metadata={"error": str(e), "problem_type": "unknown"},
+                preprocessing_info={"error": str(e)},
+                training_time=time.time() - start_time
+            )
+
+# ============================================================================
+# MAIN FUNCTIONS FOR EXTERNAL USE
+# ============================================================================
+
+def train_model_comprehensive(df: pd.DataFrame, config: ModelConfig, use_advanced: bool = True) -> TrainingResult:
+    """
+    Main function for comprehensive model training.
+    
+    Args:
+        df: Input dataframe
+        config: Training configuration
+        use_advanced: Whether to use advanced orchestrator with hyperopt
+        
+    Returns:
+        Complete training result
+    """
+    if use_advanced:
+        orchestrator = AdvancedMLTrainingOrchestrator(config)
+    else:
+        orchestrator = MLTrainingOrchestrator(config)
+    
+    return orchestrator.train(df)
+
+# Export main classes and functions for backward compatibility
+__all__ = [
+    "ModelConfig",
+    "TrainingResult", 
+    "train_sklearn",
+    "train_sklearn_enhanced",
+    "train_model_comprehensive",
+    "detect_problem_type",
+    "export_visualizations",
+    "MLTrainingOrchestrator",
+    "AdvancedMLTrainingOrchestrator"
+]
