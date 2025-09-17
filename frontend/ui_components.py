@@ -816,39 +816,3 @@ if __name__ == "__main__":
             config = sidebar_config(["auto", "xgboost"])
             st.write("Stare API działa!", {"dataset": old_name, "target": target})
 
-# --- TMIVApp shim: zachowuje kompatybilność z app.py, gdy ktoś importuje klasę ---
-# Jeśli w tym module istnieją funkcje o nazwach takich jak 'header', 'glossary_box',
-# wywołania app.header() będą delegowane do header() itd.
-
-from typing import Any, Callable
-
-# Jeśli nie masz tych funkcji w module, dodaj proste wersje awaryjne:
-try:
-    header  # type: ignore[name-defined]
-except NameError:  # brak header() w module -> prosta wersja
-    import streamlit as st
-    def header(title: str = "TMIV"):
-        st.set_page_config(page_title=title, layout="wide")
-        st.markdown(f"# {title}")
-
-try:
-    glossary_box  # type: ignore[name-defined]
-except NameError:  # brak glossary_box() -> prosta wersja
-    import streamlit as st
-    GLOSSARY = {}
-    def glossary_box(location: str = "sidebar"):
-        where = st.sidebar if location == "sidebar" else st
-        with where:
-            where.markdown("### 🧠 Słowniczek")
-            if not GLOSSARY:
-                where.caption("Brak haseł.")
-
-class TMIVApp:
-    """Lekki adapter: app.header() -> header(), app.glossary_box() -> glossary_box(), itd."""
-    def __getattr__(self, name: str) -> Any:
-        obj = globals().get(name)
-        if callable(obj):
-            return obj
-        raise AttributeError(f"TMIVApp: brak atrybutu lub funkcji '{name}' w frontend.ui_components")
-
-__all__ = [*([n for n in globals() if not n.startswith("_")]), "TMIVApp"]
