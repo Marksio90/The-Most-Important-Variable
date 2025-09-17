@@ -1358,7 +1358,7 @@ def build_and_save_full_reports(out_dir: Path) -> Dict[str, List[str]]:
 # 🏋️‍♂️ Trening — UI
 # ==============================
 st.markdown("## 🏋️‍♂️ Trening")
-st.caption("**Silnik ML:** Auto (dobór silnika i opcji na podstawie danych")
+st.caption("**Silnik ML:** Auto")
 with st.form("train_form", clear_on_submit=False):
     train_btn = st.form_submit_button("🚀 Wytrenuj model", type="primary")
     # Pierwszy rząd
