@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+.env.*
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# Outputs
+tmiv_out/
+models/
+artifacts/
+*.joblib
+*.pkl
+
+# VSCode / notebooks
+.vscode/
+.ipynb_checkpoints/
