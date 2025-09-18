@@ -1,0 +1,3 @@
+"""
+Quality Assurance - testy aplikacji.
+"""
