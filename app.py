@@ -14,24 +14,24 @@ import plotly.express as px
 import plotly.figure_factory as ff
 
 # ====== MODUŁY PROJEKTU (po patchach) ======
-from settings import get_settings, MLEngine
-from ui_components import TMIVApp, DataConfig, UIConfig
+from config.settings import get_settings, MLEngine
+from frontend.ui_components import TMIVApp, DataConfig, UIConfig
 from backend.utils import (
     SmartTargetDetector, auto_pick_target, get_openai_key_from_envs,
     to_local, utc_now_iso_z
 )
-from ml_integration import (
+from backend.ml_integration import (
     ModelConfig, train_model_comprehensive,
     save_model_artifacts, load_model_artifacts
 )
-from db_utils import (
+from db.db_utils import (
     MLExperimentTracker, RunRecord,
     ProblemType, RunStatus, QueryFilter
 )
 
 # (opcjonalnie) lekki preproces
 try:
-    from eda_integration import SmartDataPreprocessor
+    from backend.eda_integration import SmartDataPreprocessor
 except Exception:
     SmartDataPreprocessor = None  # type: ignore
 
