@@ -1035,42 +1035,52 @@ class TMIVApplication:
                 hyperopt_trials = st.slider("Optymalizacja hiperparametrów", 10, 200, 50)
                 compute_shap = st.checkbox("Oblicz SHAP values", value=len(df) < 1000)
                 random_state = st.number_input("Random seed", value=42, min_value=0)
+                
+                # DODANE: Wybór silnika ML
+                ml_engine = st.selectbox("Silnik ML:", [
+                    "auto_pycaret" if 'pycaret' not in missing_modules else "auto",
+                    "sklearn", 
+                    "lightgbm", 
+                    "xgboost",
+                    "pycaret"
+                ], help="auto_pycaret = PyCaret z porównaniem wielu modeli")
         
         # Enhanced training button with validation
         target_valid = df[target].notna().sum() > 10
         features_valid = len(df.select_dtypes(include=[np.number]).columns) > 0
-        
+
         if not target_valid:
-            st.warning("⚠️ Za mało prawidłowych wartości w kolumnie docelowej")
+            st.warning("Za mało prawidłowych wartości w kolumnie docelowej")
         elif not features_valid:
-            st.warning("⚠️ Brak zmiennych numerycznych do treningu")
+            st.warning("Brak zmiennych numerycznych do treningu")
         else:
-            if st.button("🎯 Rozpocznij trening modelu", type="primary", use_container_width=True):
+            if st.button("Rozpocznij trening modelu", type="primary", use_container_width=True):
                 self._train_model_enhanced(df, target, cv_folds, remove_outliers, 
-                                         hyperopt_trials, compute_shap, test_size, random_state)
-    
+                                        hyperopt_trials, compute_shap, test_size, random_state, ml_engine)  # DODANE ml_engine
+            
     def _train_model_enhanced(self, df: pd.DataFrame, target: str, cv_folds: int, 
                             remove_outliers: bool, hyperopt_trials: int, compute_shap: bool,
-                            test_size: float, random_state: int):
-        """Ulepszony trening modelu z lepszym feedbackiem"""
+                            test_size: float, random_state: int, ml_engine: str = "auto"):  # DODANE ml_engine
+        """Ulepszony trening modelu z PyCaret support"""
         
-        with st.status("🔄 Trening modelu w toku...", expanded=True) as status:
+        with st.status("Trening modelu w toku...", expanded=True) as status:
             try:
                 # Step 1: Data preprocessing
-                status.update(label="📋 Przygotowywanie danych...")
-                time.sleep(0.5)  # Visual feedback
+                status.update(label="Przygotowywanie danych...")
+                time.sleep(0.5)
                 
                 preprocessor = SmartDataPreprocessor()
                 df_processed, prep_report = preprocessor.preprocess(df, target)
                 
-                st.write(f"✅ Dane przygotowane: {prep_report.original_shape[0]:,} → {prep_report.final_shape[0]:,} wierszy")
+                st.write(f"Dane przygotowane: {prep_report.original_shape[0]:,} → {prep_report.final_shape[0]:,} wierszy")
                 
                 # Step 2: Model configuration  
-                status.update(label="⚙️ Konfiguracja modelu...")
+                status.update(label="Konfiguracja modelu...")
                 time.sleep(0.5)
                 
                 model_config = ModelConfig(
                     target=target,
+                    engine=ml_engine,  # ZMIENIONE: używaj wybranego engine
                     cv_folds=cv_folds,
                     hyperopt_trials=hyperopt_trials,
                     outlier_detection=remove_outliers,
@@ -1078,7 +1088,9 @@ class TMIVApplication:
                     random_state=random_state
                 )
                 
-                st.write("✅ Model skonfigurowany")
+                st.write(f"Model skonfigurowany (engine: {ml_engine})")
+            
+            # Reszta funkcji bez zmian...
                 
                 # Step 3: Training
                 status.update(label="🎯 Trenowanie modelu...")
