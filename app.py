@@ -14,15 +14,7 @@ import json
 import logging
 import io
 import time
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import io
-import zipfile
 from datetime import datetime
-import seaborn as sns
-import matplotlib.pyplot as plt
-from typing import Dict
 
 # Konfiguracja strony - musi być pierwsza
 st.set_page_config(
@@ -35,13 +27,43 @@ st.set_page_config(
 # Importy modułów aplikacji - z obsługą błędów
 missing_modules = []
 
+# Plotly imports with error handling
 try:
     import plotly.express as px
     import plotly.graph_objects as go
-except ImportError:
-    missing_modules.append("plotly")
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except ImportError as e:
+    missing_modules.append(f"plotly: {e}")
     px = None
     go = None
+    HAS_PLOTLY = False
+
+# Seaborn and matplotlib imports with fallback
+try:
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+    HAS_SEABORN = True
+except ImportError as e:
+    missing_modules.append(f"seaborn/matplotlib: {e}")
+    sns = None
+    plt = None
+    HAS_SEABORN = False
+
+# Other utility imports with fallbacks
+try:
+    import zipfile
+    HAS_ZIPFILE = True
+except ImportError as e:
+    missing_modules.append(f"zipfile: {e}")
+    HAS_ZIPFILE = False
+
+try:
+    import joblib
+    HAS_JOBLIB = True
+except ImportError as e:
+    missing_modules.append(f"joblib: {e}")
+    HAS_JOBLIB = False
 
 # 1. Settings - naprawiony import z kompatybilnością
 try:
@@ -683,7 +705,7 @@ class TMIVApplication:
             
             if categorical_stats:
                 st.dataframe(pd.DataFrame(categorical_stats), use_container_width=True)
-    
+
     def _render_distributions(self, df: pd.DataFrame):
         """Renderuje rozkłady zmiennych z ulepszeniami"""
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -704,7 +726,7 @@ class TMIVApplication:
         )
         
         if selected_cols:
-            if px:
+            if HAS_PLOTLY:  # ZMIENIONE: użyj HAS_PLOTLY zamiast px
                 # Create subplots for multiple columns
                 for i, col in enumerate(selected_cols):
                     st.write(f"**{col}**")
@@ -712,7 +734,7 @@ class TMIVApplication:
                     col1, col2 = st.columns([2, 1])
                     with col1:
                         fig = px.histogram(df, x=col, marginal="box", 
-                                         title=f"Rozkład: {col}")
+                                        title=f"Rozkład: {col}")
                         fig.update_layout(height=400)
                         st.plotly_chart(fig, use_container_width=True)
                     
@@ -741,7 +763,7 @@ class TMIVApplication:
                     with col2:
                         st.write(f"Skośność: {df[col].skew():.3f}")
                         st.write(f"Kurtoza: {df[col].kurtosis():.3f}")
-    
+
     def _render_correlations(self, df: pd.DataFrame):
         """Renderuje ulepszony analizę korelacji"""
         numeric_df = df.select_dtypes(include=[np.number])
@@ -754,7 +776,7 @@ class TMIVApplication:
         
         corr_matrix = numeric_df.corr()
         
-        if px:
+        if HAS_PLOTLY:  # ZMIENIONE: użyj HAS_PLOTLY
             # Enhanced heatmap
             fig = px.imshow(
                 corr_matrix,
@@ -793,7 +815,7 @@ class TMIVApplication:
                 st.warning("⚠️ Wykryto bardzo silne korelacje - rozważ usunięcie niektórych zmiennych")
         else:
             st.info(f"Brak korelacji silniejszych niż {threshold}")
-    
+
     def _render_target_analysis(self, df: pd.DataFrame):
         """Ulepszona analiza zmiennej docelowej"""
         if not self.state.target_column:
@@ -827,22 +849,22 @@ class TMIVApplication:
                 # Visualization with problem type detection
                 problem_type = getattr(analysis.problem_type, 'value', 'unknown')
                 
-                if px and problem_type == "regression":
+                if HAS_PLOTLY and problem_type == "regression":  # ZMIENIONE: dodaj HAS_PLOTLY
                     col1, col2 = st.columns([2, 1])
                     with col1:
                         fig = px.histogram(df, x=target_col, marginal="box", 
-                                         title=f"Rozkład targetu: {target_col}")
+                                        title=f"Rozkład targetu: {target_col}")
                         st.plotly_chart(fig, use_container_width=True)
                     with col2:
                         target_stats = df[target_col].describe()
                         st.dataframe(target_stats)
                         
-                elif px and problem_type in ["classification", "binary_classification"]:
+                elif HAS_PLOTLY and problem_type in ["classification", "binary_classification"]:  # ZMIENIONE
                     value_counts = df[target_col].value_counts()
                     col1, col2 = st.columns([2, 1])
                     with col1:
                         fig = px.bar(x=value_counts.index, y=value_counts.values,
-                                   title=f"Rozkład klas: {target_col}")
+                                title=f"Rozkład klas: {target_col}")
                         fig.update_xaxis(title="Klasy")
                         fig.update_yaxis(title="Liczebność")
                         st.plotly_chart(fig, use_container_width=True)
@@ -874,6 +896,157 @@ class TMIVApplication:
                 self._render_basic_target_analysis(df, target_col)
         else:
             self._render_basic_target_analysis(df, target_col)
+
+    def create_predictions_vs_actual_plot(y_test, y_pred, model_type):
+        """Create predictions vs actual plot - with fallback if seaborn/plotly unavailable"""
+        if model_type == 'regression':
+            # Scatter plot for regression
+            if HAS_PLOTLY:  # ZMIENIONE
+                fig = go.Figure()
+                
+                fig.add_trace(go.Scatter(
+                    x=y_test, y=y_pred,
+                    mode='markers',
+                    name='Predictions',
+                    marker=dict(color='blue', opacity=0.6)
+                ))
+                
+                # Perfect prediction line
+                min_val = min(min(y_test), min(y_pred))
+                max_val = max(max(y_test), max(y_pred))
+                fig.add_trace(go.Scatter(
+                    x=[min_val, max_val], y=[min_val, max_val],
+                    mode='lines',
+                    name='Perfect Prediction',
+                    line=dict(color='red', dash='dash')
+                ))
+                
+                fig.update_layout(
+                    title="Regression: Predicted vs Actual Values",
+                    xaxis_title="Actual Values",
+                    yaxis_title="Predicted Values"
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Plotly not available - showing basic statistics instead")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Actual values stats:**")
+                    st.write(pd.Series(y_test).describe())
+                with col2:
+                    st.write("**Predicted values stats:**")
+                    st.write(pd.Series(y_pred).describe())
+                
+        else:  # classification
+            # Confusion Matrix
+            try:
+                from sklearn.metrics import confusion_matrix
+                
+                cm = confusion_matrix(y_test, y_pred)
+                
+                if HAS_SEABORN and HAS_PLOTLY:  # ZMIENIONE
+                    # Use seaborn if available
+                    fig, ax = plt.subplots(figsize=(8, 6))
+                    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+                    ax.set_xlabel('Predicted')
+                    ax.set_ylabel('Actual')
+                    ax.set_title('Confusion Matrix')
+                    st.pyplot(fig)
+                    
+                elif HAS_PLOTLY:  # ZMIENIONE
+                    # Fallback to plotly heatmap
+                    fig = go.Figure(data=go.Heatmap(
+                        z=cm,
+                        text=cm,
+                        texttemplate="%{text}",
+                        textfont={"size": 20},
+                        colorscale='Blues'
+                    ))
+                    fig.update_layout(
+                        title="Confusion Matrix",
+                        xaxis_title="Predicted",
+                        yaxis_title="Actual"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    # Basic text display
+                    st.write("**Confusion Matrix:**")
+                    st.dataframe(pd.DataFrame(cm), use_container_width=True)
+                    
+            except Exception as e:
+                st.error(f"Could not create confusion matrix: {str(e)}")
+                st.write("**Classification Results Summary:**")
+                st.write(f"Total predictions: {len(y_pred)}")
+
+    def plot_feature_importance(feature_importance_df: pd.DataFrame, top_n: int = 20):
+        """Create interactive feature importance plot - with fallback"""
+        if feature_importance_df.empty:
+            st.warning("Feature importance not available for this model")
+            return
+        
+        st.subheader("🎯 Feature Importance")
+        
+        # Take top N features
+        top_features = feature_importance_df.head(top_n)
+        
+        if HAS_PLOTLY:  # ZMIENIONE
+            # Create horizontal bar chart
+            fig = go.Figure(go.Bar(
+                x=top_features['importance'],
+                y=top_features['feature'],
+                orientation='h',
+                marker_color='lightblue',
+                text=[f'{v:.4f}' for v in top_features['importance']],
+                textposition='auto',
+            ))
+            
+            fig.update_layout(
+                title=f"Top {len(top_features)} Most Important Features",
+                xaxis_title="Importance Score",
+                yaxis_title="Features",
+                height=max(400, len(top_features) * 25),
+                yaxis={'categoryorder': 'total ascending'}
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            # Fallback to simple display
+            st.bar_chart(top_features.set_index('feature')['importance'])
+            
+            # Show as table
+            st.dataframe(
+                top_features[['feature', 'importance']].rename(columns={
+                    'feature': 'Feature', 
+                    'importance': 'Importance'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    def create_model_export_section(model, metrics_dict, feature_importance_df, X_test=None, y_test=None):
+        """Advanced model export functionality - with fallback if joblib unavailable"""
+        st.subheader("📦 Export & Download")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            # Model pickle export
+            if st.button("💾 Download Model") and model is not None:
+                if HAS_JOBLIB:  # ZMIENIONE
+                    buffer = io.BytesIO()
+                    joblib.dump(model, buffer)
+                    buffer.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Download .joblib",
+                        data=buffer.getvalue(),
+                        file_name=f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.joblib",
+                        mime="application/octet-stream"
+                    )
+                else:
+                    st.warning("Joblib not available - model export disabled")
+    
     
     def _render_basic_target_analysis(self, df: pd.DataFrame, target_col: str):
         """Podstawowa analiza targetu (fallback)"""
