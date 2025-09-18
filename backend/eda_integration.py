@@ -95,6 +95,9 @@ class ColumnAnalysis:
     statistics: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
+# W pliku backend/eda_integration.py, dodaj do klasy PreprocessingReport:
+
+@dataclass
 class PreprocessingReport:
     """Raport z preprocessingu danych."""
     original_shape: Tuple[int, int]
@@ -104,6 +107,18 @@ class PreprocessingReport:
     transformations: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     processing_time: float = 0.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Konwertuje raport do słownika."""
+        return {
+            "original_shape": self.original_shape,
+            "final_shape": self.final_shape,
+            "dropped_columns": self.dropped_columns,
+            "created_columns": self.created_columns,
+            "transformations": self.transformations,
+            "warnings": self.warnings,
+            "processing_time": self.processing_time
+        }
     
     def summary(self) -> str:
         """Zwraca podsumowanie preprocessingu."""
