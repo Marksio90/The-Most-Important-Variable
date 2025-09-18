@@ -14,7 +14,7 @@ import plotly.express as px
 import plotly.figure_factory as ff
 
 # ====== MODUŁY PROJEKTU (po patchach) ======
-from config.settings import get_settings, MLEngine
+from config.settings import get_settings, MLEngine, as_dict, engines_enabled
 from frontend.ui_components import TMIVApp, DataConfig, UIConfig
 from backend.utils import (
     SmartTargetDetector, auto_pick_target, get_openai_key_from_envs,
@@ -106,6 +106,79 @@ def _show_metrics(metrics: Dict[str, Any], metadata: Dict[str, Any]):
         with c2:
             st.json(metadata or {})
 
+# ================== DEBUG PANEL ==================
+def _render_debug_panel(settings) -> None:
+    if not getattr(settings, "show_debug_panel", True):
+        return
+
+    with st.sidebar.expander("🔧 Debug konfiguracji (DEV)", expanded=False):
+        # Meta czasu
+        try:
+            now_utc = pd.Timestamp.utcnow().to_pydatetime()
+            now_loc = to_local(now_utc)
+            st.caption(f"UTC: {now_utc:%Y-%m-%d %H:%M:%S}Z  •  Lokalnie: {now_loc:%Y-%m-%d %H:%M:%S}")
+        except Exception:
+            pass
+
+        # Zebrane ustawienia
+        try:
+            cfg = as_dict(settings)
+        except Exception:
+            cfg = {}
+
+        # Silniki ML i klucze
+        try:
+            engines = engines_enabled(settings)
+        except Exception:
+            engines = {}
+
+        has_openai = bool(get_openai_key_from_envs())
+        try:
+            _ = st.secrets  # dostępny tylko jeśli istnieje poprawny secrets.toml
+            has_secrets = True
+        except Exception:
+            has_secrets = False
+
+        # Wersje bibliotek (bez crashy)
+        def _ver(pkg: str) -> str:
+            try:
+                from importlib.metadata import version
+                return version(pkg)
+            except Exception:
+                return "—"
+
+        libs = {
+            "python": f"{np.__version__} (numpy as marker)"
+        }
+        libs.update({
+            "streamlit": _ver("streamlit"),
+            "numpy": _ver("numpy"),
+            "pandas": _ver("pandas"),
+            "scikit-learn": _ver("scikit-learn"),
+            "lightgbm": _ver("lightgbm"),
+            "xgboost": _ver("xgboost"),
+            "catboost": _ver("catboost"),
+        })
+
+        st.markdown("**Środowisko**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write(f"App env: **{getattr(settings, 'app_env', 'DEV')}**")
+            st.write(f"Output dir: `{getattr(settings, 'output_dir', '')}`")
+            st.write(f"Models dir: `{getattr(settings, 'models_dir', '')}`")
+        with c2:
+            st.write(f"LLM key: {'✅' if has_openai else '—'}")
+            st.write(f"st.secrets: {'✅' if has_secrets else '—'}")
+
+        st.markdown("**Silniki ML**")
+        st.json(engines, expanded=False)
+
+        st.markdown("**Ustawienia (skrót)**")
+        st.json(cfg, expanded=False)
+
+        st.markdown("**Wersje**")
+        st.json(libs, expanded=False)
+
 
 # ================== HISTORIA (log) ==================
 def _log_run(tracker: MLExperimentTracker, *, dataset_name: str, target: str,
@@ -161,6 +234,9 @@ def main():
     st.set_page_config(page_title="TMIV", layout="wide")
     st.title("TMIV — AutoML")
     st.caption("Analiza danych • Trening • **Historia uruchomień** • Rejestr modeli")
+
+    # Panel debug tylko jeśli włączony w settings
+    _render_debug_panel(settings)
 
     # ===== Konfiguracja UI =====
     data_cfg = DataConfig(
