@@ -1,4 +1,4 @@
-https://tmiv---the-most-important-variable.streamlit.app/
+https://the-most-important-variable-production.up.railway.app/
 
 # 📊 TMIV – The Most Important Variables
 
