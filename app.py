@@ -33,15 +33,23 @@ except ImportError:
 
 try:
     from config.settings import get_settings
+    # Test czy działa
+    test_settings = get_settings()
+    if not hasattr(test_settings, 'data'):
+        raise ImportError("Settings object missing data attribute")
 except ImportError:
     missing_modules.append("config.settings")
     def get_settings():
+        class MockData:
+            max_file_size_mb = 200
+            supported_formats = [".csv", ".xlsx", ".json"]
+        
         class MockSettings:
             app_name = "TMIV - The Most Important Variables"
-            class data:
-                max_file_size_mb = 200
-                supported_formats = [".csv", ".xlsx", ".json"]
-            def get_feature_flag(self, flag): return True
+            data = MockData()
+            def get_feature_flag(self, flag): 
+                return True
+        
         return MockSettings()
 
 try:
@@ -275,16 +283,21 @@ class TMIVApplication:
         
     def _setup_configs(self):
         """Konfiguruje komponenty aplikacji"""
+        # Bezpieczne pobieranie atrybutów
+        max_size = getattr(getattr(self.settings, 'data', None), 'max_file_size_mb', 200)
+        formats = getattr(getattr(self.settings, 'data', None), 'supported_formats', ['.csv', '.xlsx'])
+        app_title = getattr(self.settings, 'app_name', 'TMIV')
+        
         self.data_config = DataConfig(
-            max_file_size_mb=getattr(self.settings.data, 'max_file_size_mb', 200),
-            supported_formats=getattr(self.settings.data, 'supported_formats', ['.csv', '.xlsx']),
+            max_file_size_mb=max_size,
+            supported_formats=formats,
             auto_detect_encoding=True,
             max_preview_rows=50
         )
         
         self.ui_config = UIConfig(
-            app_title=getattr(self.settings, 'app_name', 'TMIV'),
-            app_subtitle="AutoML • EDA • Historia eksperymentów • Jeden eksport ZIP",
+            app_title=app_title,
+            app_subtitle="AutoML • EDA • Historia eksperymentów",
             enable_llm=bool(get_openai_key()),
             show_advanced_options=True
         )
