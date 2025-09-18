@@ -14,6 +14,15 @@ import json
 import logging
 import io
 import time
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import io
+import zipfile
+from datetime import datetime
+import seaborn as sns
+import matplotlib.pyplot as plt
+from typing import Dict
 
 # Konfiguracja strony - musi być pierwsza
 st.set_page_config(
@@ -476,6 +485,9 @@ class TMIVApplication:
         
         # NAPRAWKA: Zawsze renderuj sekcję danych
         self._data_loading_phase()
+        
+        # Advanced ML Section - DODAJ TĘ LINIĘ
+        self._render_advanced_ml_section()
         
         # NAPRAWKA: Pokazuj wyniki jeśli są dostępne
         if self.state.training_completed and self.state.model is not None:
@@ -1058,6 +1070,556 @@ class TMIVApplication:
                 self._train_model_enhanced(df, target, cv_folds, remove_outliers, 
                                         hyperopt_trials, compute_shap, test_size, random_state, ml_engine)  # DODANE ml_engine
             
+    def _render_advanced_ml_section(self):
+        """Advanced ML section integrated with TMIV"""
+        st.markdown("## 🤖 Advanced Machine Learning Suite")
+        
+        # Check if we have data
+        if self.state.dataset is None:
+            st.warning("⚠️ Please upload data first in the data loading section above!")
+            return
+        
+        data = self.state.dataset
+        
+        # Model configuration section
+        st.subheader("🎯 Enhanced Model Configuration")
+        
+        col1, col2 = st.columns([3, 2])
+        
+        with col1:
+            # Target selection with current state
+            current_target_idx = 0
+            if self.state.target_column and self.state.target_column in data.columns:
+                current_target_idx = list(data.columns).index(self.state.target_column)
+            
+            target_col = st.selectbox(
+                "Select Target Variable", 
+                data.columns, 
+                index=current_target_idx,
+                key="advanced_ml_target_select"
+            )
+            
+            # Update state
+            self.state.target_column = target_col
+            
+            # Feature selection
+            all_features = [col for col in data.columns if col != target_col]
+            feature_cols = st.multiselect(
+                "Select Features (leave empty for all)",
+                all_features,
+                default=[],
+                key="advanced_ml_feature_select"
+            )
+            
+            if not feature_cols:
+                feature_cols = all_features
+        
+        with col2:
+            st.subheader("⚙️ Advanced Settings")
+            
+            # Engine selection based on available modules
+            engine_options = ['auto']
+            if not any('pycaret' in str(m) for m in missing_modules):
+                engine_options.extend(['pycaret', 'auto_pycaret'])
+            engine_options.extend(['sklearn', 'lightgbm', 'xgboost'])
+            
+            engine = st.selectbox("ML Engine", engine_options, index=0, key="advanced_ml_engine")
+            
+            test_size = st.slider("Test Size", 0.1, 0.5, 0.2, key="advanced_ml_test_size")
+            random_state = st.number_input("Random State", 0, 1000, 42, key="advanced_ml_random_state")
+            
+            cv_folds = st.slider("Cross Validation", 2, 10, 5, key="advanced_ml_cv")
+            hyperopt_trials = st.slider("Hyperparameter Optimization", 10, 100, 50, key="advanced_ml_hyperopt")
+        
+        # Auto-detect problem type
+        if target_col and target_col in data.columns:
+            try:
+                if USE_REAL_ML:
+                    from backend.ml_integration import detect_problem_type
+                    detected_problem_type = detect_problem_type(data[target_col])
+                else:
+                    # Fallback detection
+                    unique_vals = data[target_col].nunique()
+                    if unique_vals <= 10 and data[target_col].dtype in ['object', 'category']:
+                        detected_problem_type = "classification"
+                    elif unique_vals <= 20 and data[target_col].dtype in ['int64']:
+                        detected_problem_type = "classification"
+                    else:
+                        detected_problem_type = "regression"
+                
+                st.info(f"🔍 Detected problem type: **{detected_problem_type}**")
+            except:
+                detected_problem_type = "unknown"
+        
+        # Training section
+        if len(feature_cols) > 0 and target_col:
+            st.divider()
+            st.subheader("🏋️ Enhanced Model Training")
+            
+            # Training tabs for different approaches
+            train_tab1, train_tab2, train_tab3 = st.tabs([
+                "🚀 Quick Training", "🎯 AutoML (PyCaret)", "🔧 Advanced Options"
+            ])
+            
+            with train_tab1:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    use_advanced = st.checkbox(
+                        "Use Advanced Training Pipeline", 
+                        value=True, 
+                        key="advanced_ml_use_advanced"
+                    )
+                    
+                with col2:
+                    if st.button("🚀 Train Model", type="primary", key="advanced_ml_train_button"):
+                        self._train_advanced_ml_model(
+                            data, target_col, feature_cols, engine, test_size, 
+                            random_state, cv_folds, hyperopt_trials, use_advanced, detected_problem_type
+                        )
+            
+            with train_tab2:
+                if not any('pycaret' in str(m) for m in missing_modules):
+                    st.write("**🎯 Automated ML with PyCaret**")
+                    st.info("PyCaret will compare multiple algorithms and select the best one automatically")
+                    
+                    if st.button("🔍 Compare & Train Best Model", key="pycaret_auto_train"):
+                        self._train_pycaret_automl(data, target_col, feature_cols, detected_problem_type)
+                else:
+                    st.warning("PyCaret not available - using fallback AutoML")
+                    if st.button("🔍 Train AutoML (Fallback)", key="fallback_auto_train"):
+                        self._train_advanced_ml_model(
+                            data, target_col, feature_cols, 'auto', test_size, 
+                            random_state, cv_folds, hyperopt_trials, True, detected_problem_type
+                        )
+            
+            with train_tab3:
+                st.write("**🔧 Advanced Configuration**")
+                
+                with st.expander("Preprocessing Options"):
+                    handle_outliers = st.checkbox("Remove Outliers", value=True)
+                    feature_scaling = st.selectbox("Feature Scaling", ['standard', 'robust', 'minmax', 'none'])
+                    handle_imbalance = st.checkbox("Handle Class Imbalance", value=False)
+                
+                with st.expander("Model Options"):
+                    ensemble_methods = st.checkbox("Use Ensemble Methods", value=False)
+                    compute_shap = st.checkbox("Compute SHAP Values", value=False)
+                    early_stopping = st.checkbox("Early Stopping", value=True)
+                
+                if st.button("🚀 Train Advanced Model", key="advanced_custom_train"):
+                    advanced_config = {
+                        'handle_outliers': handle_outliers,
+                        'feature_scaling': feature_scaling,
+                        'handle_imbalance': handle_imbalance,
+                        'ensemble_methods': ensemble_methods,
+                        'compute_shap': compute_shap,
+                        'early_stopping': early_stopping
+                    }
+                    self._train_advanced_ml_model(
+                        data, target_col, feature_cols, engine, test_size, 
+                        random_state, cv_folds, hyperopt_trials, True, detected_problem_type, advanced_config
+                    )
+        
+        # Display results if training completed
+        if hasattr(st.session_state, 'advanced_ml_result') and st.session_state.advanced_ml_result:
+            self._display_advanced_ml_results()
+        
+        # Model comparison dashboard
+        self._display_ml_model_history()
+
+    def _train_advanced_ml_model(self, data, target_col, feature_cols, engine, test_size, 
+                                random_state, cv_folds, hyperopt_trials, use_advanced, 
+                                detected_problem_type, advanced_config=None):
+        """Train advanced ML model with comprehensive pipeline"""
+        
+        with st.spinner("Training advanced ML model... This may take several minutes"):
+            try:
+                # Prepare training data
+                training_data = data[feature_cols + [target_col]].copy()
+                
+                start_time = time.time()
+                
+                if USE_REAL_ML:
+                    # Use real ML integration
+                    from backend.ml_integration import ModelConfig, train_model_comprehensive
+                    
+                    config = ModelConfig(
+                        target=target_col,
+                        engine=engine,
+                        cv_folds=cv_folds,
+                        test_size=test_size,
+                        random_state=random_state,
+                        hyperopt_trials=hyperopt_trials,
+                        use_optuna=True,
+                        feature_engineering=True,
+                        outlier_detection=advanced_config.get('handle_outliers', True) if advanced_config else True
+                    )
+                    
+                    result = train_model_comprehensive(
+                        df=training_data, 
+                        config=config, 
+                        use_advanced=use_advanced
+                    )
+                    
+                else:
+                    # Enhanced mock training
+                    config = ModelConfig(
+                        target=target_col,
+                        cv_folds=cv_folds,
+                        hyperopt_trials=hyperopt_trials,
+                        outlier_detection=True
+                    )
+                    
+                    model, metrics, fi_df, metadata = train_sklearn_enhanced(training_data, config)
+                    
+                    # Create result-like object
+                    class MockResult:
+                        def __init__(self):
+                            self.model = model
+                            self.metrics = metrics
+                            self.feature_importance = fi_df
+                            self.metadata = metadata
+                            self.training_time = time.time() - start_time
+                            self.preprocessing_info = {}
+                    
+                    result = MockResult()
+                
+                # Store results
+                st.session_state.advanced_ml_result = result
+                st.session_state.advanced_ml_feature_cols = feature_cols
+                st.session_state.advanced_ml_target_col = target_col
+                st.session_state.advanced_ml_problem_type = detected_problem_type
+                
+                # Update main app state as well
+                self.state.model = result.model
+                self.state.metrics = result.metrics
+                self.state.feature_importance = result.feature_importance
+                self.state.metadata = result.metadata
+                self.state.training_completed = True
+                
+                st.success(f"✅ Advanced ML model trained successfully! Training time: {result.training_time:.2f}s")
+                st.balloons()
+                
+            except Exception as e:
+                st.error(f"Advanced ML training failed: {str(e)}")
+                import traceback
+                with st.expander("🔍 Error Details"):
+                    st.code(traceback.format_exc())
+
+    def _train_pycaret_automl(self, data, target_col, feature_cols, detected_problem_type):
+        """Train model using PyCaret AutoML"""
+        
+        with st.spinner("Running PyCaret AutoML... Comparing multiple models"):
+            try:
+                training_data = data[feature_cols + [target_col]].copy()
+                
+                if USE_REAL_ML:
+                    from backend.ml_integration import PyCaretTrainer
+                    
+                    trainer = PyCaretTrainer()
+                    trainer.setup_pycaret(training_data.drop(columns=[target_col]), training_data[target_col])
+                    
+                    # Compare models
+                    comparison_results = trainer.compare_models()
+                    st.subheader("🏆 Model Comparison Results")
+                    st.dataframe(comparison_results.head(10))
+                    
+                    # Train best model
+                    trainer.fit(training_data.drop(columns=[target_col]), training_data[target_col], model_name='best')
+                    
+                    # Create result object
+                    class PyCaretResult:
+                        def __init__(self):
+                            self.model = trainer.model
+                            self.metrics = trainer.metrics
+                            self.feature_importance = trainer.get_feature_importance()
+                            self.metadata = {'engine': 'pycaret', 'comparison_results': comparison_results}
+                            self.training_time = 0  # PyCaret handles timing internally
+                            self.preprocessing_info = {}
+                    
+                    result = PyCaretResult()
+                    
+                    # Store results
+                    st.session_state.advanced_ml_result = result
+                    st.session_state.advanced_ml_feature_cols = feature_cols
+                    st.session_state.advanced_ml_target_col = target_col
+                    st.session_state.advanced_ml_problem_type = detected_problem_type
+                    
+                    st.success("✅ PyCaret AutoML completed! Best model selected and trained.")
+                    
+                else:
+                    st.warning("PyCaret not available - using fallback")
+                    
+            except Exception as e:
+                st.error(f"PyCaret AutoML failed: {str(e)}")
+
+    def _display_advanced_ml_results(self):
+        """Display comprehensive ML results"""
+        st.divider()
+        st.markdown("## 📊 Advanced ML Results")
+        
+        result = st.session_state.advanced_ml_result
+        feature_cols = st.session_state.advanced_ml_feature_cols
+        target_col = st.session_state.advanced_ml_target_col
+        problem_type = st.session_state.advanced_ml_problem_type
+        
+        if result.model is None:
+            st.error("No trained model available")
+            return
+        
+        # Create comprehensive tabs
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "📈 Performance", "🎯 Predictions", "📊 Visualizations", 
+            "🔍 Model Analysis", "📦 Export", "ℹ️ Details"
+        ])
+        
+        with tab1:
+            # Performance metrics
+            display_model_metrics(result.metrics, problem_type)
+            
+            # Cross-validation if available
+            if hasattr(result, 'metrics') and 'cv_scores' in result.metrics:
+                st.subheader("🔄 Cross-Validation Results")
+                cv_scores = result.metrics['cv_scores']
+                if cv_scores:
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("CV Mean", f"{np.mean(cv_scores):.4f}")
+                    with col2:
+                        st.metric("CV Std", f"{np.std(cv_scores):.4f}")
+                    with col3:
+                        st.metric("CV Range", f"±{1.96 * np.std(cv_scores):.4f}")
+        
+        with tab2:
+            # Predictions interface
+            self._render_advanced_predictions_interface(result, feature_cols, target_col, problem_type)
+        
+        with tab3:
+            # Advanced visualizations
+            self._render_advanced_visualizations(result, feature_cols, target_col, problem_type)
+        
+        with tab4:
+            # Model analysis
+            self._render_model_analysis(result, feature_cols)
+        
+        with tab5:
+            # Export functionality
+            self._render_export_functionality(result, feature_cols, target_col)
+        
+        with tab6:
+            # Detailed information
+            self._render_detailed_model_info(result)
+
+    def _render_advanced_predictions_interface(self, result, feature_cols, target_col, problem_type):
+        """Advanced predictions interface"""
+        st.subheader("🎯 Model Predictions")
+        
+        # Split data for testing
+        from sklearn.model_selection import train_test_split
+        
+        X = self.state.dataset[feature_cols]
+        y = self.state.dataset[target_col]
+        
+        try:
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42,
+                stratify=y if problem_type == "classification" and y.nunique() > 1 else None
+            )
+        except:
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        pred_col1, pred_col2 = st.columns([2, 1])
+        
+        with pred_col1:
+            if st.button("📊 Predict on Test Set", key="advanced_predict_test"):
+                try:
+                    predictions = result.model.predict(X_test)
+                    
+                    # Create comprehensive results
+                    results_df = X_test.copy()
+                    results_df['Actual'] = y_test.values
+                    results_df['Predicted'] = predictions
+                    
+                    if problem_type == 'regression':
+                        results_df['Error'] = results_df['Actual'] - results_df['Predicted']
+                        results_df['Absolute_Error'] = abs(results_df['Error'])
+                        results_df['Percentage_Error'] = (results_df['Error'] / results_df['Actual'] * 100).round(2)
+                    
+                    st.dataframe(results_df.head(20), use_container_width=True)
+                    
+                    # Performance summary
+                    if problem_type == 'classification':
+                        accuracy = (predictions == y_test).mean()
+                        st.success(f"🎯 Test Accuracy: {accuracy:.4f}")
+                    else:
+                        mae = np.mean(abs(predictions - y_test))
+                        rmse = np.sqrt(np.mean((predictions - y_test)**2))
+                        mape = np.mean(abs((predictions - y_test) / y_test)) * 100
+                        st.success(f"📊 MAE: {mae:.4f} | RMSE: {rmse:.4f} | MAPE: {mape:.2f}%")
+                        
+                except Exception as e:
+                    st.error(f"Prediction failed: {str(e)}")
+        
+        with pred_col2:
+            # Single prediction interface
+            st.write("**Single Prediction Interface**")
+            single_prediction_interface(result.model, feature_cols, X_train, problem_type)
+
+    def _render_advanced_visualizations(self, result, feature_cols, target_col, problem_type):
+        """Advanced visualizations for ML results"""
+        st.subheader("📊 Advanced Visualizations")
+        
+        # Feature importance
+        if hasattr(result, 'feature_importance') and not result.feature_importance.empty:
+            plot_feature_importance(result.feature_importance)
+        
+        # Predictions vs Actual
+        try:
+            from sklearn.model_selection import train_test_split
+            X = self.state.dataset[feature_cols]
+            y = self.state.dataset[target_col]
+            
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            predictions = result.model.predict(X_test)
+            
+            create_predictions_vs_actual_plot(y_test, predictions, problem_type)
+            
+        except Exception as e:
+            st.error(f"Visualization failed: {str(e)}")
+
+    def _render_model_analysis(self, result, feature_cols):
+        """Advanced model analysis"""
+        st.subheader("🔍 Model Analysis & Insights")
+        
+        # Model complexity
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Features Used", len(feature_cols))
+            st.metric("Model Type", type(result.model).__name__)
+        
+        with col2:
+            if hasattr(result, 'training_time'):
+                st.metric("Training Time", f"{result.training_time:.2f}s")
+            st.metric("Data Points", f"{len(self.state.dataset):,}")
+        
+        with col3:
+            # Model performance assessment
+            if 'r2' in result.metrics:
+                r2 = result.metrics['r2']
+                performance = "Excellent" if r2 > 0.8 else "Good" if r2 > 0.6 else "Poor"
+                st.metric("Performance", performance)
+            elif 'accuracy' in result.metrics:
+                acc = result.metrics['accuracy']
+                performance = "Excellent" if acc > 0.85 else "Good" if acc > 0.7 else "Poor"
+                st.metric("Performance", performance)
+
+    def _render_export_functionality(self, result, feature_cols, target_col):
+        """Advanced export functionality"""
+        st.subheader("📦 Advanced Export Options")
+        
+        # Prepare test data
+        from sklearn.model_selection import train_test_split
+        X = self.state.dataset[feature_cols]
+        y = self.state.dataset[target_col]
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        create_model_export_section(
+            result.model, 
+            result.metrics, 
+            getattr(result, 'feature_importance', pd.DataFrame()),
+            X_test, 
+            y_test
+        )
+
+    def _render_detailed_model_info(self, result):
+        """Detailed model information"""
+        st.subheader("ℹ️ Detailed Model Information")
+        
+        with st.expander("🔍 Model Metadata", expanded=True):
+            if hasattr(result, 'metadata'):
+                st.json(result.metadata)
+        
+        with st.expander("📊 Model Parameters"):
+            if hasattr(result.model, 'get_params'):
+                st.json(result.model.get_params())
+        
+        with st.expander("🔧 Training Configuration"):
+            config_info = {
+                "Features": st.session_state.advanced_ml_feature_cols,
+                "Target": st.session_state.advanced_ml_target_col,
+                "Problem Type": st.session_state.advanced_ml_problem_type,
+                "Training Time": getattr(result, 'training_time', 'Unknown'),
+                "Model Class": type(result.model).__name__
+            }
+            st.json(config_info)
+
+    def _display_ml_model_history(self):
+        """Display ML model history and comparison"""
+        st.divider()
+        st.subheader("🏆 ML Model History & Comparison")
+        
+        # Save current model to history
+        if hasattr(st.session_state, 'advanced_ml_result') and st.session_state.advanced_ml_result:
+            if st.button("📝 Save Model to History", key="save_advanced_ml_history"):
+                result = st.session_state.advanced_ml_result
+                
+                model_record = {
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'model_name': type(result.model).__name__,
+                    'engine': getattr(result.metadata, 'engine', 'unknown') if hasattr(result, 'metadata') else 'unknown',
+                    'problem_type': st.session_state.advanced_ml_problem_type,
+                    'features': len(st.session_state.advanced_ml_feature_cols),
+                    'training_time': getattr(result, 'training_time', 0),
+                    **{k: v for k, v in result.metrics.items() if isinstance(v, (int, float))}
+                }
+                
+                if 'advanced_ml_history' not in st.session_state:
+                    st.session_state.advanced_ml_history = []
+                
+                st.session_state.advanced_ml_history.append(model_record)
+                st.success("✅ Model saved to history!")
+        
+        # Display history
+        if 'advanced_ml_history' in st.session_state and st.session_state.advanced_ml_history:
+            history_df = pd.DataFrame(st.session_state.advanced_ml_history)
+            
+            # Show history table
+            st.dataframe(history_df, use_container_width=True)
+            
+            # Comparison chart
+            if len(history_df) > 1:
+                metric_cols = [col for col in ['accuracy', 'r2', 'mae', 'rmse', 'f1_weighted'] 
+                              if col in history_df.columns and history_df[col].notna().any()]
+                
+                if metric_cols and go:
+                    selected_metric = st.selectbox(
+                        "Choose metric for comparison", 
+                        metric_cols, 
+                        key="advanced_ml_metric_comparison"
+                    )
+                    
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=history_df['model_name'],
+                        y=history_df[selected_metric],
+                        name=selected_metric.upper(),
+                        marker_color='lightblue',
+                        text=[f"{v:.4f}" for v in history_df[selected_metric]],
+                        textposition='auto'
+                    ))
+                    
+                    fig.update_layout(
+                        title=f"Model Comparison - {selected_metric.upper()}",
+                        xaxis_title="Models",
+                        yaxis_title=selected_metric.upper(),
+                        height=400
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("💡 Train models to build comparison history!")
+
     def _train_model_enhanced(self, df: pd.DataFrame, target: str, cv_folds: int, 
                             remove_outliers: bool, hyperopt_trials: int, compute_shap: bool,
                             test_size: float, random_state: int, ml_engine: str = "auto"):  # DODANE ml_engine
@@ -1801,6 +2363,267 @@ class TMIVApplication:
             st.error(f"Błąd eksportu: {e}")
             logger.exception("Failed to export enhanced results")
 
+# ===== DODAJ TE FUNKCJE PRZED def main(): W app.py =====
+
+def display_model_metrics(metrics_dict, model_type: str):
+    """Display model performance metrics in a nice layout"""
+    st.subheader("📊 Model Performance Metrics")
+    
+    if model_type == "classification":
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if 'accuracy' in metrics_dict:
+                st.metric("Accuracy", f"{metrics_dict['accuracy']:.4f}")
+        with col2:
+            if 'f1_weighted' in metrics_dict:
+                st.metric("F1-Score", f"{metrics_dict['f1_weighted']:.4f}")
+        with col3:
+            if 'roc_auc' in metrics_dict:
+                st.metric("ROC AUC", f"{metrics_dict['roc_auc']:.4f}")
+        with col4:
+            if 'balanced_accuracy' in metrics_dict:
+                st.metric("Balanced Accuracy", f"{metrics_dict['balanced_accuracy']:.4f}")
+                
+        # Second row
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            if 'precision' in metrics_dict:
+                st.metric("Precision", f"{metrics_dict.get('precision', 0):.4f}")
+        with col2:
+            if 'recall' in metrics_dict:
+                st.metric("Recall", f"{metrics_dict.get('recall', 0):.4f}")
+        with col3:
+            if 'mcc' in metrics_dict:
+                st.metric("Matthews Corr Coef", f"{metrics_dict.get('mcc', 0):.4f}")
+                
+    else:  # regression
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if 'r2' in metrics_dict:
+                st.metric("R² Score", f"{metrics_dict['r2']:.4f}")
+        with col2:
+            if 'mae' in metrics_dict:
+                st.metric("MAE", f"{metrics_dict['mae']:.4f}")
+        with col3:
+            if 'rmse' in metrics_dict:
+                st.metric("RMSE", f"{metrics_dict['rmse']:.4f}")
+
+def plot_feature_importance(feature_importance_df: pd.DataFrame, top_n: int = 20):
+    """Create interactive feature importance plot"""
+    if feature_importance_df.empty:
+        st.warning("Feature importance not available for this model")
+        return
+    
+    st.subheader("🎯 Feature Importance")
+    
+    # Take top N features
+    top_features = feature_importance_df.head(top_n)
+    
+    # Create horizontal bar chart
+    fig = go.Figure(go.Bar(
+        x=top_features['importance'],
+        y=top_features['feature'],
+        orientation='h',
+        marker_color='lightblue',
+        text=[f'{v:.4f}' for v in top_features['importance']],
+        textposition='auto',
+    ))
+    
+    fig.update_layout(
+        title=f"Top {len(top_features)} Most Important Features",
+        xaxis_title="Importance Score",
+        yaxis_title="Features",
+        height=max(400, len(top_features) * 25),
+        yaxis={'categoryorder': 'total ascending'}
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+def create_model_export_section(model, metrics_dict, feature_importance_df, X_test=None, y_test=None):
+    """Advanced model export functionality"""
+    st.subheader("📦 Export & Download")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        # Model pickle export
+        if st.button("💾 Download Model") and model is not None:
+            import joblib
+            
+            buffer = io.BytesIO()
+            joblib.dump(model, buffer)
+            buffer.seek(0)
+            
+            st.download_button(
+                label="📥 Download .joblib",
+                data=buffer.getvalue(),
+                file_name=f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}.joblib",
+                mime="application/octet-stream"
+            )
+    
+    with col2:
+        # Model report export
+        if st.button("📊 Download Report"):
+            report = f"""
+MODEL TRAINING REPORT
+====================
+
+Model Information:
+- Type: {type(model).__name__ if model else 'Unknown'}
+- Training Status: {'✅ Trained' if model else '❌ Not Trained'}
+
+Performance Metrics:
+{chr(10).join([f"- {k}: {v:.4f}" for k, v in metrics_dict.items() if isinstance(v, (int, float))])}
+
+Feature Importance:
+{feature_importance_df.head(10).to_string() if not feature_importance_df.empty else 'Not available'}
+"""
+            
+            st.download_button(
+                label="📥 Download Report",
+                data=report,
+                file_name=f"model_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
+    
+    with col3:
+        # Predictions export
+        if st.button("🎯 Download Predictions") and X_test is not None and model is not None:
+            try:
+                predictions = model.predict(X_test)
+                
+                # Create predictions DataFrame
+                pred_df = X_test.copy()
+                pred_df['predictions'] = predictions
+                if y_test is not None:
+                    pred_df['actual'] = y_test
+                
+                csv_buffer = io.StringIO()
+                pred_df.to_csv(csv_buffer, index=False)
+                
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv_buffer.getvalue(),
+                    file_name=f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.error(f"Prediction export failed: {str(e)}")
+
+def create_predictions_vs_actual_plot(y_test, y_pred, model_type):
+    """Create predictions vs actual plot"""
+    if model_type == 'regression':
+        # Scatter plot for regression
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=y_test, y=y_pred,
+            mode='markers',
+            name='Predictions',
+            marker=dict(color='blue', opacity=0.6)
+        ))
+        
+        # Perfect prediction line
+        min_val = min(min(y_test), min(y_pred))
+        max_val = max(max(y_test), max(y_pred))
+        fig.add_trace(go.Scatter(
+            x=[min_val, max_val], y=[min_val, max_val],
+            mode='lines',
+            name='Perfect Prediction',
+            line=dict(color='red', dash='dash')
+        ))
+        
+        fig.update_layout(
+            title="Regression: Predicted vs Actual Values",
+            xaxis_title="Actual Values",
+            yaxis_title="Predicted Values"
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+    else:  # classification
+        # Confusion Matrix
+        from sklearn.metrics import confusion_matrix
+        
+        cm = confusion_matrix(y_test, y_pred)
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('Actual')
+        ax.set_title('Confusion Matrix')
+        
+        st.pyplot(fig)
+
+def single_prediction_interface(model, feature_columns, X_train, model_type):
+    """Interface for single instance prediction"""
+    st.write("Enter values for prediction:")
+    
+    input_data = {}
+    
+    # Limit to first 10 features for UI manageability
+    display_features = feature_columns[:10]
+    
+    for feature in display_features:
+        if feature in X_train.select_dtypes(include=[np.number]).columns:
+            # Numeric input
+            min_val = float(X_train[feature].min())
+            max_val = float(X_train[feature].max())
+            mean_val = float(X_train[feature].mean())
+            
+            input_data[feature] = st.number_input(
+                f"{feature}",
+                min_value=min_val,
+                max_value=max_val,
+                value=mean_val,
+                key=f"single_pred_{feature}"
+            )
+        else:
+            # Categorical input
+            unique_values = X_train[feature].unique()
+            input_data[feature] = st.selectbox(
+                f"{feature}",
+                options=unique_values,
+                key=f"single_pred_{feature}"
+            )
+    
+    if st.button("🎯 Make Prediction"):
+        try:
+            # Create input dataframe with all features
+            input_df = pd.DataFrame([input_data])
+            
+            # Add missing features with default values
+            for col in feature_columns:
+                if col not in input_df.columns:
+                    if col in X_train.select_dtypes(include=[np.number]).columns:
+                        input_df[col] = X_train[col].mean()
+                    else:
+                        mode_val = X_train[col].mode()
+                        input_df[col] = mode_val[0] if not mode_val.empty else "MISSING"
+            
+            # Reorder columns to match training data
+            input_df = input_df[feature_columns]
+            
+            # Make prediction
+            prediction = model.predict(input_df)[0]
+            
+            st.success(f"Prediction: **{prediction}**")
+            
+            # Show probability if classification
+            if model_type == 'classification' and hasattr(model, 'predict_proba'):
+                try:
+                    proba = model.predict_proba(input_df)
+                    if proba is not None:
+                        proba_dict = {f"Class_{i}": prob for i, prob in enumerate(proba[0])}
+                        st.write("**Prediction Probabilities:**")
+                        st.json(proba_dict)
+                except:
+                    pass
+                    
+        except Exception as e:
+            st.error(f"Prediction failed: {str(e)}")
 
 def main():
     """Enhanced main function with better error handling"""
