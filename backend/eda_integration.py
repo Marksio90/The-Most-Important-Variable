@@ -1,8 +1,11 @@
+"""
+Backend EDA Integration - Kompletna implementacja
+Zawiera AdvancedColumnAnalyzer i SmartDataPreprocessor
+"""
 from __future__ import annotations
-from typing import Dict, List, Optional, Tuple, Any, Union, Protocol
+from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass, field
 from enum import Enum
-from abc import ABC, abstractmethod
 import json
 import logging
 import warnings
@@ -10,11 +13,22 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from datetime import datetime
-import hashlib
+import time
+
+# Importy dla OpenAI (opcjonalne)
+try:
+    import openai
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
 
 # Konfiguracja logowania
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# ENUMERATORY I KONFIGURACJA
+# ============================================================================
 
 class ColumnType(Enum):
     """Typy kolumn dla lepszej kategoryzacji."""
@@ -27,27 +41,16 @@ class ColumnType(Enum):
     ID = "Identyfikator"
     BINARY = "Zmienna binarna"
 
-class TransformationStatus(Enum):
-    """Status transformacji danych."""
-    SUCCESS = "success"
-    PARTIAL = "partial"
-    FAILED = "failed"
-    SKIPPED = "skipped"
-
-@dataclass
-class TransformationResult:
-    """Wynik pojedynczej transformacji."""
-    status: TransformationStatus
-    message: str
-    data_changed: bool = False
-    affected_columns: List[str] = field(default_factory=list)
-    created_columns: List[str] = field(default_factory=list)
-    dropped_columns: List[str] = field(default_factory=list)
-    metrics: Dict[str, Any] = field(default_factory=dict)
+class DataQuality(Enum):
+    """Poziomy jakości danych."""
+    EXCELLENT = "excellent"
+    GOOD = "good"
+    FAIR = "fair"
+    POOR = "poor"
 
 @dataclass
 class PreprocessingConfig:
-    """Uproszczona konfiguracja dla preprocessingu."""
+    """Konfiguracja dla automatycznego preprocessingu."""
     # Ogólne
     remove_duplicates: bool = True
     handle_missing: bool = True
@@ -77,1074 +80,851 @@ class PreprocessingConfig:
     constant_value: str = "MISSING"
 
 @dataclass
+class ColumnAnalysis:
+    """Wynik analizy pojedynczej kolumny."""
+    name: str
+    dtype: str
+    column_type: ColumnType
+    quality: DataQuality
+    unique_count: int
+    missing_count: int
+    missing_percentage: float
+    description: str
+    recommendations: List[str] = field(default_factory=list)
+    sample_values: List[str] = field(default_factory=list)
+    statistics: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
 class PreprocessingReport:
-    """Kompleksowy raport z preprocessingu danych."""
+    """Raport z preprocessingu danych."""
     original_shape: Tuple[int, int]
     final_shape: Tuple[int, int]
-    transformation_results: List[TransformationResult] = field(default_factory=list)
+    dropped_columns: Dict[str, List[str]] = field(default_factory=dict)
+    created_columns: List[str] = field(default_factory=list)
+    transformations: Dict[str, Any] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
     processing_time: float = 0.0
     
-    def add_result(self, result: TransformationResult) -> None:
-        """Dodaje wynik transformacji do raportu."""
-        self.transformation_results.append(result)
-    
-    def get_summary(self) -> Dict[str, Any]:
+    def summary(self) -> str:
         """Zwraca podsumowanie preprocessingu."""
-        successful = sum(1 for r in self.transformation_results if r.status == TransformationStatus.SUCCESS)
-        failed = sum(1 for r in self.transformation_results if r.status == TransformationStatus.FAILED)
+        dropped_total = sum(len(cols) for cols in self.dropped_columns.values())
+        created_total = len(self.created_columns)
         
-        all_dropped = []
-        all_created = []
-        for result in self.transformation_results:
-            all_dropped.extend(result.dropped_columns)
-            all_created.extend(result.created_columns)
-        
-        return {
-            "original_shape": self.original_shape,
-            "final_shape": self.final_shape,
-            "successful_transformations": successful,
-            "failed_transformations": failed,
-            "total_dropped_columns": len(set(all_dropped)),
-            "total_created_columns": len(set(all_created)),
-            "processing_time": self.processing_time
-        }
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Konwertuje raport do słownika."""
-        return {
-            "summary": self.get_summary(),
-            "transformations": [
-                {
-                    "status": result.status.value,
-                    "message": result.message,
-                    "data_changed": result.data_changed,
-                    "affected_columns": result.affected_columns,
-                    "created_columns": result.created_columns,
-                    "dropped_columns": result.dropped_columns,
-                    "metrics": result.metrics
-                } for result in self.transformation_results
-            ]
-        }
+        return f"""
+## 📊 Podsumowanie Preprocessingu
+
+**Rozmiar danych:**
+- Przed: {self.original_shape[0]:,} wierszy × {self.original_shape[1]} kolumn
+- Po: {self.final_shape[0]:,} wierszy × {self.final_shape[1]} kolumn
+
+**Zmiany kolumn:**
+- Usunięte: {dropped_total} kolumn
+- Utworzone: {created_total} kolumn
+
+**Czas przetwarzania:** {self.processing_time:.2f}s
+"""
 
 # ============================================================================
-# PROTOKOŁY I ABSTRAKCJE
+# ADVANCED COLUMN ANALYZER
 # ============================================================================
 
-class DataTransformer(Protocol):
-    """Protokół dla transformatorów danych."""
-    def transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, TransformationResult]:
-        """Wykonuje transformację danych."""
-        ...
-
-class ColumnAnalyzer(Protocol):
-    """Protokół dla analizatorów kolumn."""
-    def analyze_columns(self, df: pd.DataFrame) -> Dict[str, str]:
-        """Analizuje kolumny i zwraca ich opisy."""
-        ...
-
-# ============================================================================
-# TRANSFORMATORY DANYCH (PIPELINE PATTERN)
-# ============================================================================
-
-class BaseTransformer(ABC):
-    """Bazowa klasa dla transformatorów danych."""
+class AdvancedColumnAnalyzer:
+    """Zaawansowany analizator kolumn z integracją OpenAI."""
     
-    def __init__(self, name: str):
-        self.name = name
+    def __init__(self, enable_llm: bool = False, openai_api_key: Optional[str] = None):
+        self.enable_llm = enable_llm and HAS_OPENAI
+        self.openai_api_key = openai_api_key
+        
+        if self.enable_llm and self.openai_api_key:
+            openai.api_key = self.openai_api_key
     
-    @abstractmethod
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        """Wykonuje konkretną transformację."""
-        pass
-    
-    def transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, TransformationResult]:
-        """Główna metoda transformacji z error handling."""
-        try:
-            df_transformed, metrics = self._execute_transform(df.copy(), config)
-            
-            # Sprawdź czy dane się zmieniły
-            data_changed = not df.equals(df_transformed)
-            
-            result = TransformationResult(
-                status=TransformationStatus.SUCCESS,
-                message=f"{self.name} completed successfully",
-                data_changed=data_changed,
-                metrics=metrics
-            )
-            
-            return df_transformed, result
-            
-        except Exception as e:
-            logger.error(f"{self.name} failed: {e}")
-            result = TransformationResult(
-                status=TransformationStatus.FAILED,
-                message=f"{self.name} failed: {str(e)}",
-                data_changed=False
-            )
-            return df, result
-
-class RemoveEmptyColumnsTransformer(BaseTransformer):
-    """Usuwa kolumny z wysokim odsetkiem braków."""
-    
-    def __init__(self):
-        super().__init__("Remove Empty Columns")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        empty_cols = []
+    def analyze_column(self, series: pd.Series, column_name: str) -> ColumnAnalysis:
+        """Analizuje pojedynczą kolumnę."""
         
-        for col in df.columns:
-            missing_pct = df[col].isna().sum() / len(df)
-            if missing_pct >= config.drop_missing_threshold:
-                empty_cols.append(col)
+        # Podstawowe statystyki
+        dtype = str(series.dtype)
+        unique_count = series.nunique()
+        missing_count = series.isna().sum()
+        missing_percentage = (missing_count / len(series)) * 100
         
-        if empty_cols:
-            df = df.drop(columns=empty_cols)
+        # Określ typ kolumny
+        column_type = self._determine_column_type(series, column_name)
         
-        metrics = {
-            "dropped_columns": empty_cols,
-            "drop_threshold": config.drop_missing_threshold
-        }
+        # Ocena jakości
+        quality = self._assess_quality(series, missing_percentage, unique_count)
         
-        return df, metrics
-
-class RemoveConstantColumnsTransformer(BaseTransformer):
-    """Usuwa kolumny stałe lub prawie stałe."""
-    
-    def __init__(self):
-        super().__init__("Remove Constant Columns")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        constant_cols = []
+        # Statystyki specyficzne dla typu
+        statistics = self._calculate_statistics(series, column_type)
         
-        for col in df.columns:
-            try:
-                unique_ratio = df[col].nunique(dropna=True) / df[col].notna().sum()
-                if unique_ratio < (1 - config.drop_constant_threshold) or df[col].nunique(dropna=True) <= 1:
-                    constant_cols.append(col)
-            except (ZeroDivisionError, ValueError):
-                constant_cols.append(col)
+        # Próbki wartości
+        sample_values = self._get_sample_values(series)
         
-        if constant_cols:
-            df = df.drop(columns=constant_cols)
+        # Opis kolumny
+        description = self._generate_description(series, column_name, column_type)
         
-        metrics = {
-            "dropped_columns": constant_cols,
-            "constant_threshold": config.drop_constant_threshold
-        }
+        # Rekomendacje
+        recommendations = self._generate_recommendations(series, column_type, quality)
         
-        return df, metrics
-
-class DateTimeTransformer(BaseTransformer):
-    """Parsuje daty i tworzy cechy czasowe."""
-    
-    def __init__(self):
-        super().__init__("DateTime Features")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        if not config.parse_dates:
-            return df, {"skipped": "Date parsing disabled"}
-        
-        date_cols = []
-        created_features = []
-        
-        for col in df.columns:
-            if self._is_datetime_column(df[col]):
-                try:
-                    dt_series = pd.to_datetime(df[col], errors='coerce')
-                    
-                    if config.create_date_features:
-                        base_name = col.replace('_date', '').replace('_time', '').replace('_at', '')
-                        
-                        feature_mapping = {
-                            "year": lambda x: x.dt.year,
-                            "month": lambda x: x.dt.month,
-                            "day": lambda x: x.dt.day,
-                            "dayofweek": lambda x: x.dt.dayofweek,
-                            "quarter": lambda x: x.dt.quarter,
-                            "is_weekend": lambda x: (x.dt.dayofweek >= 5).astype(int)
-                        }
-                        
-                        for feature_name in config.date_features:
-                            if feature_name in feature_mapping:
-                                new_col = f"{base_name}__{feature_name}"
-                                df[new_col] = feature_mapping[feature_name](dt_series)
-                                created_features.append(new_col)
-                    
-                    # Zachowaj oryginalną kolumnę jako datetime
-                    df[col] = dt_series
-                    date_cols.append(col)
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to parse datetime column {col}: {e}")
-        
-        metrics = {
-            "processed_date_columns": date_cols,
-            "created_features": created_features
-        }
-        
-        return df, metrics
-    
-    def _is_datetime_column(self, series: pd.Series) -> bool:
-        """Sprawdza czy kolumna zawiera daty."""
-        if pd.api.types.is_datetime64_any_dtype(series):
-            return True
-        
-        if series.dtype == 'object':
-            try:
-                sample = series.dropna().head(min(50, len(series)))
-                if len(sample) > 0:
-                    pd.to_datetime(sample, errors='raise')
-                    return True
-            except (ValueError, TypeError):
-                pass
-        
-        return False
-
-class DuplicateRemovalTransformer(BaseTransformer):
-    """Usuwa duplikaty."""
-    
-    def __init__(self):
-        super().__init__("Remove Duplicates")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        if not config.remove_duplicates:
-            return df, {"skipped": "Duplicate removal disabled"}
-        
-        initial_rows = len(df)
-        df_dedupe = df.drop_duplicates()
-        duplicates_removed = initial_rows - len(df_dedupe)
-        
-        metrics = {
-            "duplicates_removed": duplicates_removed,
-            "initial_rows": initial_rows,
-            "final_rows": len(df_dedupe)
-        }
-        
-        return df_dedupe, metrics
-
-class HighCardinalityTransformer(BaseTransformer):
-    """Obsługuje kategorie wysokiej kardynalności."""
-    
-    def __init__(self):
-        super().__init__("High Cardinality Treatment")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        capped_cols = {}
-        
-        for col in df.columns:
-            if df[col].dtype in ['object', 'category']:
-                unique_count = df[col].nunique()
-                
-                if unique_count > config.category_threshold:
-                    # Zostaw top N kategorii, resztę zamień na 'OTHER'
-                    value_counts = df[col].value_counts()
-                    top_categories = set(value_counts.head(config.max_categories).index)
-                    
-                    df[col] = df[col].apply(lambda x: x if x in top_categories else 'OTHER')
-                    capped_cols[col] = {
-                        "original_unique": unique_count,
-                        "capped_to": config.max_categories
-                    }
-        
-        metrics = {
-            "capped_columns": capped_cols,
-            "category_threshold": config.category_threshold,
-            "max_categories": config.max_categories
-        }
-        
-        return df, metrics
-
-class OutlierTransformer(BaseTransformer):
-    """Obsługuje wartości odstające."""
-    
-    def __init__(self):
-        super().__init__("Outlier Treatment")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        if not config.enable_outlier_treatment:
-            return df, {"skipped": "Outlier treatment disabled"}
-        
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        treated_cols = []
-        
-        for col in numeric_cols:
-            try:
-                if config.outlier_method == 'winsorize':
-                    lower_bound = df[col].quantile(config.lower_quantile)
-                    upper_bound = df[col].quantile(config.upper_quantile)
-                    df[col] = df[col].clip(lower_bound, upper_bound)
-                    treated_cols.append(col)
-                    
-                elif config.outlier_method == 'clip':
-                    Q1 = df[col].quantile(0.25)
-                    Q3 = df[col].quantile(0.75)
-                    IQR = Q3 - Q1
-                    lower_bound = Q1 - 1.5 * IQR
-                    upper_bound = Q3 + 1.5 * IQR
-                    df[col] = df[col].clip(lower_bound, upper_bound)
-                    treated_cols.append(col)
-                    
-            except Exception as e:
-                logger.warning(f"Failed to treat outliers in {col}: {e}")
-        
-        metrics = {
-            "treated_columns": treated_cols,
-            "method": config.outlier_method,
-            "quantile_range": [config.lower_quantile, config.upper_quantile]
-        }
-        
-        return df, metrics
-
-class MissingValueTransformer(BaseTransformer):
-    """Imputuje brakujące wartości."""
-    
-    def __init__(self):
-        super().__init__("Missing Value Imputation")
-    
-    def _execute_transform(self, df: pd.DataFrame, config: PreprocessingConfig) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        if not config.handle_missing:
-            return df, {"skipped": "Missing value handling disabled"}
-        
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-        
-        imputed_numeric = []
-        imputed_categorical = []
-        
-        # Numeryczne
-        for col in numeric_cols:
-            if df[col].isna().any():
-                if config.numeric_imputation == 'mean':
-                    fill_value = df[col].mean()
-                elif config.numeric_imputation == 'median':
-                    fill_value = df[col].median()
-                elif config.numeric_imputation == 'mode':
-                    fill_value = df[col].mode().iloc[0] if not df[col].mode().empty else 0
-                else:
-                    fill_value = 0
-                
-                df[col] = df[col].fillna(fill_value)
-                imputed_numeric.append(col)
-        
-        # Kategoryczne
-        for col in categorical_cols:
-            if df[col].isna().any():
-                if config.categorical_imputation == 'mode':
-                    try:
-                        fill_value = df[col].mode().iloc[0]
-                    except (IndexError, AttributeError):
-                        fill_value = config.constant_value
-                else:
-                    fill_value = config.constant_value
-                
-                df[col] = df[col].fillna(fill_value)
-                imputed_categorical.append(col)
-        
-        metrics = {
-            "imputed_numeric": imputed_numeric,
-            "imputed_categorical": imputed_categorical,
-            "numeric_strategy": config.numeric_imputation,
-            "categorical_strategy": config.categorical_imputation
-        }
-        
-        return df, metrics
-
-# ============================================================================
-# PIPELINE PREPROCESSINGU
-# ============================================================================
-
-class PreprocessingPipeline:
-    """Pipeline składający się z komponentów transformacyjnych."""
-    
-    def __init__(self, config: PreprocessingConfig = None):
-        self.config = config or PreprocessingConfig()
-        self.transformers = self._create_default_pipeline()
-    
-    def _create_default_pipeline(self) -> List[BaseTransformer]:
-        """Tworzy domyślny pipeline transformacji."""
-        return [
-            RemoveEmptyColumnsTransformer(),
-            RemoveConstantColumnsTransformer(),
-            DateTimeTransformer(),
-            DuplicateRemovalTransformer(),
-            HighCardinalityTransformer(),
-            OutlierTransformer(),
-            MissingValueTransformer(),
-        ]
-    
-    def add_transformer(self, transformer: BaseTransformer) -> 'PreprocessingPipeline':
-        """Dodaje transformer do pipeline."""
-        self.transformers.append(transformer)
-        return self
-    
-    def remove_transformer(self, transformer_name: str) -> 'PreprocessingPipeline':
-        """Usuwa transformer z pipeline."""
-        self.transformers = [t for t in self.transformers if t.name != transformer_name]
-        return self
-    
-    def fit_transform(self, df: pd.DataFrame, target_column: Optional[str] = None) -> Tuple[pd.DataFrame, PreprocessingReport]:
-        """Wykonuje cały pipeline transformacji."""
-        start_time = datetime.now()
-        
-        # Inicjalizuj raport
-        report = PreprocessingReport(
-            original_shape=df.shape,
-            final_shape=df.shape
+        return ColumnAnalysis(
+            name=column_name,
+            dtype=dtype,
+            column_type=column_type,
+            quality=quality,
+            unique_count=unique_count,
+            missing_count=missing_count,
+            missing_percentage=missing_percentage,
+            description=description,
+            recommendations=recommendations,
+            sample_values=sample_values,
+            statistics=statistics
         )
-        
-        df_processed = df.copy()
-        
-        try:
-            for transformer in self.transformers:
-                df_processed, result = transformer.transform(df_processed, self.config)
-                
-                # Aktualizuj informacje o kolumnach w wyniku
-                if hasattr(result, 'metrics') and isinstance(result.metrics, dict):
-                    if 'dropped_columns' in result.metrics:
-                        result.dropped_columns = result.metrics['dropped_columns']
-                    if 'created_features' in result.metrics:
-                        result.created_columns = result.metrics['created_features']
-                
-                report.add_result(result)
-                
-                # Loguj postęp
-                if result.data_changed:
-                    logger.info(f"{transformer.name}: {result.message}")
-            
-            # Aktualizuj finalne informacje
-            report.final_shape = df_processed.shape
-            
-        except Exception as e:
-            logger.error(f"Pipeline failed: {e}")
-            error_result = TransformationResult(
-                status=TransformationStatus.FAILED,
-                message=f"Pipeline error: {str(e)}",
-                data_changed=False
-            )
-            report.add_result(error_result)
-        
-        finally:
-            # Czas przetwarzania
-            end_time = datetime.now()
-            report.processing_time = (end_time - start_time).total_seconds()
-        
-        return df_processed, report
-
-# ============================================================================
-# ANALIZATORY KOLUMN
-# ============================================================================
-
-class SmartColumnAnalyzer:
-    """Inteligentny analizator kolumn z konfigurowalnymi heurystykami."""
     
-    def __init__(self, api_key: Optional[str] = None, use_ai: bool = True):
-        self.api_key = api_key
-        self.use_ai = use_ai and api_key
-        self._setup_patterns()
-    
-    def _setup_patterns(self):
-        """Konfiguruje wzorce do rozpoznawania typów kolumn."""
-        self.patterns = {
-            ColumnType.DATETIME: {
-                'keywords': ['date', 'time', 'timestamp', 'created', 'updated', 'dt'],
-                'suffixes': ['_at', '_date', '_time'],
-                'prefixes': ['date_', 'time_']
-            },
-            ColumnType.PRICE: {
-                'keywords': ['price', 'cost', 'amount', 'value', 'revenue', 'fee', 'charge'],
-                'suffixes': ['_price', '_cost', '_amount', '_fee'],
-                'prefixes': ['price_', 'cost_', 'avg_']
-            },
-            ColumnType.VOLUME: {
-                'keywords': ['volume', 'quantity', 'qty', 'count', 'total', 'sum', 'amount'],
-                'suffixes': ['_qty', '_count', '_vol', '_total'],
-                'prefixes': ['qty_', 'vol_', 'total_']
-            },
-            ColumnType.ID: {
-                'keywords': ['id', 'key', 'index', 'identifier'],
-                'suffixes': ['_id', '_key', '_idx'],
-                'prefixes': ['id_', 'key_']
-            },
-            ColumnType.CATEGORY: {
-                'keywords': ['type', 'category', 'class', 'group', 'segment', 'region', 'status'],
-                'suffixes': ['_type', '_cat', '_class', '_group'],
-                'prefixes': ['type_', 'cat_', 'class_']
-            }
-        }
-    
-    @st.cache_data(show_spinner=False)
-    def analyze_columns(_self, df: pd.DataFrame) -> Dict[str, str]:
-        """Analizuje kolumny i zwraca ich opisy."""
-        descriptions = {}
+    def analyze_dataset(self, df: pd.DataFrame) -> List[ColumnAnalysis]:
+        """Analizuje cały dataset."""
+        analyses = []
         
-        # Najpierw spróbuj AI jeśli dostępne
-        if _self.use_ai and _self.api_key:
-            ai_descriptions = _self._get_ai_descriptions(df)
-            descriptions.update(ai_descriptions)
-        
-        # Uzupełnij heurystykami
         for column in df.columns:
-            if column not in descriptions:
-                col_type = _self._match_pattern(column, df[column])
-                descriptions[column] = col_type.value
+            try:
+                analysis = self.analyze_column(df[column], column)
+                analyses.append(analysis)
+            except Exception as e:
+                logger.warning(f"Błąd podczas analizy kolumny {column}: {e}")
+                # Dodaj podstawową analizę w przypadku błędu
+                analyses.append(ColumnAnalysis(
+                    name=column,
+                    dtype=str(df[column].dtype),
+                    column_type=ColumnType.TEXT,
+                    quality=DataQuality.POOR,
+                    unique_count=0,
+                    missing_count=len(df),
+                    missing_percentage=100.0,
+                    description=f"Błąd analizy: {e}",
+                    recommendations=["Sprawdź dane w tej kolumnie"]
+                ))
         
-        return descriptions
+        return analyses
     
-    def _match_pattern(self, column_name: str, series: pd.Series) -> ColumnType:
-        """Dopasowuje kolumnę do wzorca na podstawie nazwy i danych."""
+    def _determine_column_type(self, series: pd.Series, column_name: str) -> ColumnType:
+        """Określa typ kolumny na podstawie danych i nazwy."""
+        
         name_lower = column_name.lower()
         
-        # Sprawdź wzorce nazw
-        for col_type, config in self.patterns.items():
-            # Słowa kluczowe
-            if any(keyword in name_lower for keyword in config['keywords']):
-                return col_type
-            # Sufiksy
-            if any(name_lower.endswith(suffix) for suffix in config['suffixes']):
-                return col_type
-            # Prefiksy
-            if any(name_lower.startswith(prefix) for prefix in config['prefixes']):
-                return col_type
+        # Sprawdź po nazwie kolumny
+        if any(keyword in name_lower for keyword in ['id', 'key', 'index', 'uuid']):
+            return ColumnType.ID
         
-        # Analiza danych
-        if self._is_likely_datetime(series):
+        if any(keyword in name_lower for keyword in ['date', 'time', 'timestamp', 'created', 'updated']):
             return ColumnType.DATETIME
-        elif self._is_likely_binary(series):
-            return ColumnType.BINARY
-        elif pd.api.types.is_numeric_dtype(series):
-            return ColumnType.NUMERIC
-        else:
-            return ColumnType.TEXT
-    
-    def _is_likely_datetime(self, series: pd.Series) -> bool:
-        """Sprawdza czy seria przypomina datę."""
+        
+        if any(keyword in name_lower for keyword in ['price', 'cost', 'amount', 'revenue', 'value', 'salary']):
+            return ColumnType.PRICE
+        
+        if any(keyword in name_lower for keyword in ['volume', 'count', 'quantity', 'size', 'length']):
+            return ColumnType.VOLUME
+        
+        # Sprawdź po typie danych
         if pd.api.types.is_datetime64_any_dtype(series):
-            return True
+            return ColumnType.DATETIME
         
-        if series.dtype == 'object' and len(series.dropna()) > 0:
+        if pd.api.types.is_bool_dtype(series):
+            return ColumnType.BINARY
+        
+        # Dla numerycznych
+        if pd.api.types.is_numeric_dtype(series):
+            unique_ratio = series.nunique() / len(series)
+            
+            # Jeśli mało unikalnych wartości, prawdopodobnie kategoria
+            if unique_ratio < 0.05 or series.nunique() <= 10:
+                return ColumnType.CATEGORY
+            
+            # Sprawdź czy binarne (0/1, True/False)
+            unique_vals = set(series.dropna().unique())
+            if unique_vals.issubset({0, 1}) or unique_vals.issubset({True, False}):
+                return ColumnType.BINARY
+            
+            return ColumnType.NUMERIC
+        
+        # Dla tekstowych/object
+        if series.dtype == 'object':
+            unique_ratio = series.nunique() / len(series)
+            
+            # Wysoka unikalność = prawdopodobnie tekst/ID
+            if unique_ratio > 0.8:
+                return ColumnType.TEXT
+            
+            return ColumnType.CATEGORY
+        
+        return ColumnType.TEXT
+    
+    def _assess_quality(self, series: pd.Series, missing_percentage: float, unique_count: int) -> DataQuality:
+        """Ocenia jakość kolumny."""
+        
+        total_rows = len(series)
+        
+        # Kryteria jakości
+        if missing_percentage > 70:
+            return DataQuality.POOR
+        
+        if unique_count == 0 or (unique_count == 1 and missing_percentage < 100):
+            return DataQuality.POOR
+        
+        # Sprawdź czy wszystkie wartości unikalne (prawdopodobnie ID)
+        if unique_count == total_rows and missing_percentage < 5:
+            return DataQuality.FAIR  # Może być ID
+        
+        # Dobra jakość
+        if missing_percentage < 5 and unique_count > 1:
+            return DataQuality.EXCELLENT
+        
+        if missing_percentage < 20 and unique_count > 1:
+            return DataQuality.GOOD
+        
+        return DataQuality.FAIR
+    
+    def _calculate_statistics(self, series: pd.Series, column_type: ColumnType) -> Dict[str, Any]:
+        """Oblicza statystyki specyficzne dla typu kolumny."""
+        
+        stats = {}
+        
+        try:
+            if column_type in [ColumnType.NUMERIC, ColumnType.PRICE, ColumnType.VOLUME]:
+                numeric_series = pd.to_numeric(series, errors='coerce')
+                stats.update({
+                    'mean': float(numeric_series.mean()) if not numeric_series.isna().all() else None,
+                    'median': float(numeric_series.median()) if not numeric_series.isna().all() else None,
+                    'std': float(numeric_series.std()) if not numeric_series.isna().all() else None,
+                    'min': float(numeric_series.min()) if not numeric_series.isna().all() else None,
+                    'max': float(numeric_series.max()) if not numeric_series.isna().all() else None,
+                    'skewness': float(numeric_series.skew()) if not numeric_series.isna().all() else None
+                })
+            
+            elif column_type in [ColumnType.CATEGORY, ColumnType.TEXT, ColumnType.BINARY]:
+                value_counts = series.value_counts()
+                stats.update({
+                    'most_common': value_counts.index[0] if len(value_counts) > 0 else None,
+                    'most_common_count': int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
+                    'unique_values': int(series.nunique()),
+                    'mode': series.mode().iloc[0] if len(series.mode()) > 0 else None
+                })
+            
+            elif column_type == ColumnType.DATETIME:
+                try:
+                    dt_series = pd.to_datetime(series, errors='coerce')
+                    stats.update({
+                        'min_date': dt_series.min().isoformat() if not dt_series.isna().all() else None,
+                        'max_date': dt_series.max().isoformat() if not dt_series.isna().all() else None,
+                        'date_range_days': (dt_series.max() - dt_series.min()).days if not dt_series.isna().all() else None
+                    })
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.warning(f"Błąd przy obliczaniu statystyk: {e}")
+            stats['error'] = str(e)
+        
+        return stats
+    
+    def _get_sample_values(self, series: pd.Series, n: int = 5) -> List[str]:
+        """Zwraca próbki wartości z kolumny."""
+        
+        try:
+            # Weź unikalne wartości (bez NaN)
+            unique_values = series.dropna().unique()
+            
+            # Ogranicz do n wartości
+            if len(unique_values) > n:
+                sample = np.random.choice(unique_values, size=n, replace=False)
+            else:
+                sample = unique_values
+            
+            # Konwertuj do stringów
+            return [str(val) for val in sample]
+            
+        except Exception:
+            return []
+    
+    def _generate_description(self, series: pd.Series, column_name: str, column_type: ColumnType) -> str:
+        """Generuje opis kolumny."""
+        
+        # Spróbuj użyć LLM jeśli dostępne
+        if self.enable_llm and self.openai_api_key:
             try:
-                sample = series.dropna().head(min(100, len(series)))
-                pd.to_datetime(sample, errors='raise')
-                return True
-            except (ValueError, TypeError):
-                return False
-        return False
+                return self._get_llm_description(series, column_name, column_type)
+            except Exception as e:
+                logger.warning(f"Błąd LLM dla kolumny {column_name}: {e}")
+        
+        # Fallback na heurystyki
+        return self._get_heuristic_description(series, column_name, column_type)
     
-    def _is_likely_binary(self, series: pd.Series) -> bool:
-        """Sprawdza czy seria jest binarna."""
-        unique_vals = series.dropna().unique()
-        return len(unique_vals) <= 2
-    
-    def _get_ai_descriptions(self, df: pd.DataFrame) -> Dict[str, str]:
-        """Pobiera opisy kolumn z OpenAI API."""
+    def _get_llm_description(self, series: pd.Series, column_name: str, column_type: ColumnType) -> str:
+        """Generuje opis używając OpenAI."""
+        
+        # Przygotuj dane o kolumnie
+        sample_values = self._get_sample_values(series, 3)
+        unique_count = series.nunique()
+        missing_percentage = (series.isna().sum() / len(series)) * 100
+        
+        prompt = f"""
+Przeanalizuj kolumnę danych i opisz ją w 1-2 zdaniach po polsku.
+
+Nazwa kolumny: {column_name}
+Typ: {column_type.value}
+Unikalne wartości: {unique_count}
+Brakujące dane: {missing_percentage:.1f}%
+Przykładowe wartości: {', '.join(sample_values)}
+
+Opisz zwięźle co ta kolumna reprezentuje i jaka może być jej rola w analizie danych.
+"""
+        
         try:
-            from openai import OpenAI
-            
-            client = OpenAI(api_key=self.api_key)
-            columns_info = []
-            
-            # Przygotuj informacje o kolumnach
-            for col in df.columns:
-                sample_values = df[col].dropna().head(3).tolist()
-                dtype = str(df[col].dtype)
-                unique_count = df[col].nunique()
-                
-                columns_info.append({
-                    'name': col,
-                    'dtype': dtype,
-                    'unique_count': unique_count,
-                    'sample_values': sample_values
-                })
-            
-            prompt = f"""
-            Przeanalizuj poniższe kolumny danych i zwróć CZYSTY obiekt JSON mapujący nazwa_kolumny -> krótki opis po polsku.
-            Uwzględnij typ danych, przykładowe wartości i liczbę unikalnych wartości.
-            
-            Kolumny: {json.dumps(columns_info, ensure_ascii=False, indent=2)}
-            
-            Zwróć tylko JSON, bez dodatkowego tekstu.
-            """
-            
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=1000
+                max_tokens=100,
+                temperature=0.3
             )
-            
-            content = response.choices[0].message.content.strip()
-            content = content.replace('```json', '').replace('```', '').strip()
-            
-            return json.loads(content)
-            
+            return response.choices[0].message.content.strip()
         except Exception as e:
-            logger.warning(f"AI analysis failed: {e}")
-            return {}
-
-# ============================================================================
-# ANALIZATOR JAKOŚCI DANYCH
-# ============================================================================
-
-class DataQualityAnalyzer:
-    """Zaawansowana analiza jakości danych z cachowaniem."""
+            logger.warning(f"Błąd OpenAI: {e}")
+            return self._get_heuristic_description(series, column_name, column_type)
     
-    @staticmethod
-    @st.cache_data(show_spinner=False)
-    def comprehensive_quality_report(_df: pd.DataFrame) -> pd.DataFrame:
-        """Generuje kompleksowy raport jakości danych z cachowaniem."""
-        df = _df.copy()  # Kopiuj dla bezpieczeństwa
-        n_rows = len(df)
-        quality_metrics = []
+    def _get_heuristic_description(self, series: pd.Series, column_name: str, column_type: ColumnType) -> str:
+        """Generuje opis używając heurystyk."""
         
-        for col in df.columns:
-            series = df[col]
-            
-            # Podstawowe metryki
-            missing_count = series.isna().sum()
-            missing_pct = missing_count / n_rows if n_rows > 0 else 0
-            unique_count = series.nunique(dropna=True)
-            
-            # Zaawansowane metryki
-            is_constant = unique_count <= 1
-            is_mostly_missing = missing_pct > 0.9
-            is_unique_identifier = unique_count == (n_rows - missing_count) and unique_count > 1
-            
-            base_metrics = {
-                'column': col,
-                'dtype': str(series.dtype),
-                'missing_count': missing_count,
-                'missing_pct': round(missing_pct, 4),
-                'unique_count': unique_count,
-                'is_constant': is_constant,
-                'is_mostly_missing': is_mostly_missing,
-                'is_unique_id': is_unique_identifier,
-            }
-            
-            # Dla numerycznych
-            if pd.api.types.is_numeric_dtype(series):
-                try:
-                    zeros_count = (series == 0).sum()
-                    negatives_count = (series < 0).sum()
-                    outliers_count = DataQualityAnalyzer._detect_outliers(series).sum()
-                    
-                    base_metrics.update({
-                        'zeros_count': zeros_count,
-                        'negatives_count': negatives_count,
-                        'outliers_count': outliers_count,
-                        'mean': round(series.mean(), 4) if not series.empty else None,
-                        'std': round(series.std(), 4) if not series.empty else None,
-                    })
-                except Exception:
-                    # Fallback dla problematycznych danych numerycznych
-                    base_metrics.update({
-                        'zeros_count': 0,
-                        'negatives_count': 0,
-                        'outliers_count': 0,
-                        'mean': None,
-                        'std': None,
-                    })
-            else:
-                # Dla kategorycznych
-                try:
-                    value_counts = series.value_counts(dropna=False)
-                    most_frequent_pct = value_counts.iloc[0] / n_rows if len(value_counts) > 0 else 0
-                    
-                    base_metrics.update({
-                        'cardinality': 'high' if unique_count > 50 else 'medium' if unique_count > 10 else 'low',
-                        'most_frequent_pct': round(most_frequent_pct, 4),
-                        'top_values': dict(value_counts.head(3)) if len(value_counts) > 0 else {}
-                    })
-                except Exception:
-                    # Fallback dla problematycznych danych kategorycznych
-                    base_metrics.update({
-                        'cardinality': 'unknown',
-                        'most_frequent_pct': 0.0,
-                        'top_values': {}
-                    })
-            
-            quality_metrics.append(base_metrics)
+        unique_count = series.nunique()
+        missing_percentage = (series.isna().sum() / len(series)) * 100
         
-        quality_df = pd.DataFrame(quality_metrics)
-        return quality_df.sort_values(['missing_pct', 'is_constant'], ascending=[False, False])
-    
-    @staticmethod
-    def _detect_outliers(series: pd.Series, method: str = 'iqr') -> pd.Series:
-        """Wykrywa wartości odstające."""
-        try:
-            if method == 'iqr':
-                Q1 = series.quantile(0.25)
-                Q3 = series.quantile(0.75)
-                IQR = Q3 - Q1
-                lower_bound = Q1 - 1.5 * IQR
-                upper_bound = Q3 + 1.5 * IQR
-                return (series < lower_bound) | (series > upper_bound)
-            
-            elif method == 'zscore':
-                z_scores = np.abs((series - series.mean()) / series.std())
-                return z_scores > 3
-            
-        except Exception:
-            pass
-        
-        return pd.Series([False] * len(series), index=series.index)
-
-# ============================================================================
-# GŁÓWNA KLASA ORCHESTRATORA EDA
-# ============================================================================
-
-class SmartDataPreprocessor:
-    """Główny orchestrator preprocessingu danych z pipeline pattern."""
-    
-    def __init__(self, config: PreprocessingConfig = None):
-        self.config = config or PreprocessingConfig()
-        self.pipeline = PreprocessingPipeline(self.config)
-        self.column_analyzer = SmartColumnAnalyzer()
-        self.quality_analyzer = DataQualityAnalyzer()
-    
-    def fit_transform(self, df: pd.DataFrame, target_column: Optional[str] = None) -> Tuple[pd.DataFrame, PreprocessingReport]:
-        """Główna metoda preprocessingu z pełnym pipeline."""
-        return self.pipeline.fit_transform(df, target_column)
-    
-    def analyze_data_quality(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Analizuje jakość danych."""
-        return self.quality_analyzer.comprehensive_quality_report(df)
-    
-    def get_column_descriptions(self, df: pd.DataFrame, api_key: Optional[str] = None) -> Dict[str, str]:
-        """Pobiera opisy kolumn."""
-        if api_key:
-            self.column_analyzer.api_key = api_key
-            self.column_analyzer.use_ai = True
-        return self.column_analyzer.analyze_columns(df)
-    
-    def customize_pipeline(self) -> PreprocessingPipeline:
-        """Zwraca pipeline do customizacji."""
-        return self.pipeline
-    
-    def get_preprocessing_summary(self, report: PreprocessingReport) -> Dict[str, Any]:
-        """Zwraca czytelne podsumowanie preprocessingu."""
-        summary = report.get_summary()
-        
-        # Dodaj dodatkowe informacje
-        transformations_by_status = {}
-        for result in report.transformation_results:
-            status = result.status.value
-            if status not in transformations_by_status:
-                transformations_by_status[status] = []
-            transformations_by_status[status].append({
-                "name": result.message.split(" completed")[0].split(" failed")[0],
-                "data_changed": result.data_changed,
-                "columns_affected": len(result.affected_columns),
-                "columns_created": len(result.created_columns),
-                "columns_dropped": len(result.dropped_columns)
-            })
-        
-        summary["transformations_by_status"] = transformations_by_status
-        return summary
-
-# ============================================================================
-# KOMPATYBILNOŚĆ WSTECZNA
-# ============================================================================
-
-def get_column_descriptions(df: pd.DataFrame, api_key: Optional[str] = None) -> Dict[str, str]:
-    """Kompatybilność wsteczna - pobiera opisy kolumn."""
-    analyzer = SmartColumnAnalyzer(api_key=api_key)
-    return analyzer.analyze_columns(df)
-
-def quick_eda_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Kompatybilność wsteczna - szybkie podsumowanie EDA."""
-    return DataQualityAnalyzer.comprehensive_quality_report(df)
-
-def auto_prepare_data(df: pd.DataFrame, target: Optional[str] = None, config: Optional[PreprocessingConfig] = None) -> Tuple[pd.DataFrame, dict]:
-    """Kompatybilność wsteczna - automatyczne przygotowanie danych."""
-    preprocessor = SmartDataPreprocessor(config or PreprocessingConfig())
-    df_processed, report = preprocessor.fit_transform(df, target)
-    
-    # Konwertuj raport na stary format dla kompatybilności
-    summary = report.get_summary()
-    
-    # Zbierz informacje z transformacji
-    dropped_constant = []
-    dropped_allnull = []
-    parsed_dates = []
-    capped_cats = {}
-    dropped_duplicates = 0
-    
-    for result in report.transformation_results:
-        if "Constant" in result.message and result.metrics:
-            dropped_constant.extend(result.metrics.get('dropped_columns', []))
-        elif "Empty" in result.message and result.metrics:
-            dropped_allnull.extend(result.metrics.get('dropped_columns', []))
-        elif "DateTime" in result.message and result.metrics:
-            parsed_dates.extend(result.metrics.get('processed_date_columns', []))
-        elif "Cardinality" in result.message and result.metrics:
-            capped_cats.update(result.metrics.get('capped_columns', {}))
-        elif "Duplicates" in result.message and result.metrics:
-            dropped_duplicates = result.metrics.get('duplicates_removed', 0)
-    
-    legacy_info = {
-        'dropped_constant': dropped_constant,
-        'dropped_allnull': dropped_allnull,
-        'parsed_dates': parsed_dates,
-        'capped_cats': capped_cats,
-        'dropped_duplicates': dropped_duplicates,
-        'processing_time': report.processing_time,
-        'warnings': [r.message for r in report.transformation_results if r.status != TransformationStatus.SUCCESS]
-    }
-    
-    return df_processed, legacy_info
-
-# ============================================================================
-# ADVANCED EDA COMPONENTS
-# ============================================================================
-
-class EDAVisualizer:
-    """Komponent do tworzenia wizualizacji EDA."""
-    
-    def __init__(self, df: pd.DataFrame):
-        self.df = df
-        self._cache_key = self._generate_cache_key(df)
-    
-    def _generate_cache_key(self, df: pd.DataFrame) -> str:
-        """Generuje klucz cache na podstawie danych."""
-        try:
-            # Użyj hash z podstawowych właściwości DataFrame
-            key_data = f"{df.shape}_{list(df.columns)}_{df.dtypes.to_dict()}"
-            return hashlib.md5(key_data.encode()).hexdigest()[:16]
-        except Exception:
-            return "default_key"
-    
-    @st.cache_data(show_spinner=False)
-    def get_correlation_matrix(_self, numeric_only: bool = True) -> Optional[pd.DataFrame]:
-        """Zwraca macierz korelacji z cachowaniem."""
-        try:
-            if numeric_only:
-                numeric_df = _self.df.select_dtypes(include=[np.number])
-                if len(numeric_df.columns) < 2:
-                    return None
-                return numeric_df.corr()
-            else:
-                return _self.df.corr(numeric_only=True)
-        except Exception as e:
-            logger.error(f"Correlation calculation failed: {e}")
-            return None
-    
-    @st.cache_data(show_spinner=False)
-    def get_missing_data_summary(_self) -> pd.DataFrame:
-        """Zwraca podsumowanie braków danych."""
-        missing_data = _self.df.isnull().sum()
-        missing_pct = (missing_data / len(_self.df)) * 100
-        
-        summary = pd.DataFrame({
-            'Missing_Count': missing_data,
-            'Missing_Percentage': missing_pct
-        }).sort_values('Missing_Count', ascending=False)
-        
-        return summary[summary['Missing_Count'] > 0]
-    
-    @st.cache_data(show_spinner=False)
-    def get_categorical_summary(_self, max_categories: int = 10) -> Dict[str, pd.DataFrame]:
-        """Zwraca podsumowanie zmiennych kategorycznych."""
-        categorical_cols = _self.df.select_dtypes(include=['object', 'category']).columns
-        summaries = {}
-        
-        for col in categorical_cols:
-            value_counts = _self.df[col].value_counts().head(max_categories)
-            summaries[col] = value_counts.reset_index()
-            summaries[col].columns = [col, 'Count']
-        
-        return summaries
-
-class EDAReportGenerator:
-    """Generator raportów EDA."""
-    
-    def __init__(self, df: pd.DataFrame, preprocessor: SmartDataPreprocessor):
-        self.df = df
-        self.preprocessor = preprocessor
-        self.visualizer = EDAVisualizer(df)
-    
-    def generate_comprehensive_report(self) -> Dict[str, Any]:
-        """Generuje komprehensywny raport EDA."""
-        report = {
-            "basic_info": self._get_basic_info(),
-            "data_quality": self._get_data_quality_info(),
-            "missing_data": self._get_missing_data_info(),
-            "correlations": self._get_correlation_info(),
-            "categorical_summary": self._get_categorical_info(),
-            "recommendations": self._generate_recommendations()
+        # Bazowe opisy dla typów
+        type_descriptions = {
+            ColumnType.ID: f"Kolumna identyfikująca z {unique_count} unikalnymi wartościami.",
+            ColumnType.DATETIME: f"Kolumna czasowa obejmująca {unique_count} różnych momentów.",
+            ColumnType.PRICE: f"Wartości cenowe/finansowe z {unique_count} różnymi poziomami.",
+            ColumnType.VOLUME: f"Wielkości/ilości z {unique_count} różnymi wartościami.",
+            ColumnType.NUMERIC: f"Zmienna numeryczna z {unique_count} różnymi wartościami.",
+            ColumnType.CATEGORY: f"Zmienna kategoryczna z {unique_count} kategoriami.",
+            ColumnType.TEXT: f"Dane tekstowe z {unique_count} unikalnymi wartościami.",
+            ColumnType.BINARY: f"Zmienna binarna (tak/nie, 0/1)."
         }
         
-        return report
+        base_desc = type_descriptions.get(column_type, f"Kolumna z {unique_count} unikalnymi wartościami.")
+        
+        # Dodaj informację o brakujących danych
+        if missing_percentage > 0:
+            base_desc += f" Brakuje {missing_percentage:.1f}% wartości."
+        
+        return base_desc
     
-    def _get_basic_info(self) -> Dict[str, Any]:
-        """Podstawowe informacje o danych."""
-        return {
-            "shape": self.df.shape,
-            "memory_usage_mb": self.df.memory_usage(deep=True).sum() / 1024 / 1024,
-            "dtypes": self.df.dtypes.value_counts().to_dict(),
-            "duplicates": self.df.duplicated().sum()
-        }
-    
-    def _get_data_quality_info(self) -> Dict[str, Any]:
-        """Informacje o jakości danych."""
-        quality_df = self.preprocessor.analyze_data_quality(self.df)
+    def _generate_recommendations(self, series: pd.Series, column_type: ColumnType, quality: DataQuality) -> List[str]:
+        """Generuje rekomendacje dla kolumny."""
         
-        return {
-            "constant_columns": quality_df[quality_df['is_constant']]['column'].tolist(),
-            "mostly_missing_columns": quality_df[quality_df['is_mostly_missing']]['column'].tolist(),
-            "high_missing_columns": quality_df[quality_df['missing_pct'] > 0.5]['column'].tolist(),
-            "potential_ids": quality_df[quality_df['is_unique_id']]['column'].tolist()
-        }
-    
-    def _get_missing_data_info(self) -> Dict[str, Any]:
-        """Informacje o brakach danych."""
-        missing_summary = self.visualizer.get_missing_data_summary()
-        
-        return {
-            "columns_with_missing": len(missing_summary),
-            "total_missing_values": int(missing_summary['Missing_Count'].sum()),
-            "worst_columns": missing_summary.head(5).to_dict('records')
-        }
-    
-    def _get_correlation_info(self) -> Dict[str, Any]:
-        """Informacje o korelacjach."""
-        corr_matrix = self.visualizer.get_correlation_matrix()
-        
-        if corr_matrix is None:
-            return {"available": False}
-        
-        # Znajdź silne korelacje
-        strong_corr = []
-        for i in range(len(corr_matrix.columns)):
-            for j in range(i+1, len(corr_matrix.columns)):
-                corr_val = corr_matrix.iloc[i, j]
-                if abs(corr_val) > 0.7:
-                    strong_corr.append({
-                        'var1': corr_matrix.columns[i],
-                        'var2': corr_matrix.columns[j],
-                        'correlation': round(corr_val, 3)
-                    })
-        
-        return {
-            "available": True,
-            "strong_correlations": strong_corr,
-            "max_correlation": float(corr_matrix.abs().unstack().sort_values(ascending=False).iloc[1])
-        }
-    
-    def _get_categorical_info(self) -> Dict[str, Any]:
-        """Informacje o zmiennych kategorycznych."""
-        cat_summary = self.visualizer.get_categorical_summary()
-        
-        high_cardinality = []
-        for col, summary_df in cat_summary.items():
-            total_unique = self.df[col].nunique()
-            if total_unique > 50:
-                high_cardinality.append({
-                    'column': col,
-                    'unique_values': total_unique,
-                    'data_ratio': total_unique / len(self.df)
-                })
-        
-        return {
-            "categorical_columns": len(cat_summary),
-            "high_cardinality": high_cardinality,
-            "summary": {k: v.to_dict('records') for k, v in cat_summary.items()}
-        }
-    
-    def _generate_recommendations(self) -> List[str]:
-        """Generuje rekomendacje na podstawie analizy."""
         recommendations = []
+        missing_percentage = (series.isna().sum() / len(series)) * 100
+        unique_count = series.nunique()
         
-        # Sprawdź jakość danych
-        quality_df = self.preprocessor.analyze_data_quality(self.df)
+        # Rekomendacje dla jakości
+        if quality == DataQuality.POOR:
+            if missing_percentage > 50:
+                recommendations.append("Rozważ usunięcie tej kolumny ze względu na dużo brakujących danych")
+            if unique_count <= 1:
+                recommendations.append("Kolumna ma stałą wartość - można ją usunąć")
         
         # Rekomendacje dla braków danych
-        high_missing = quality_df[quality_df['missing_pct'] > 0.5]
-        if not high_missing.empty:
-            recommendations.append(f"Rozważ usunięcie kolumn z wysokim odsetkiem braków: {', '.join(high_missing['column'].tolist())}")
+        if missing_percentage > 20:
+            recommendations.append("Zastosuj imputację lub usuń wiersze z brakami")
         
-        # Rekomendacje dla kolumn stałych
-        constant = quality_df[quality_df['is_constant']]
-        if not constant.empty:
-            recommendations.append(f"Usuń kolumny stałe: {', '.join(constant['column'].tolist())}")
+        # Rekomendacje specyficzne dla typu
+        if column_type == ColumnType.CATEGORY:
+            if unique_count > 50:
+                recommendations.append("Wysoka kardinalność - rozważ grupowanie rzadkich kategorii")
         
-        # Rekomendacje dla wysokiej kardynalności
-        high_card = quality_df[(quality_df['dtype'] == 'object') & (quality_df['unique_count'] > 100)]
-        if not high_card.empty:
-            recommendations.append(f"Rozważ grupowanie kategorii dla kolumn wysokiej kardynalności: {', '.join(high_card['column'].tolist())}")
+        elif column_type in [ColumnType.NUMERIC, ColumnType.PRICE, ColumnType.VOLUME]:
+            try:
+                numeric_series = pd.to_numeric(series, errors='coerce')
+                if not numeric_series.isna().all():
+                    skewness = abs(numeric_series.skew())
+                    if skewness > 2:
+                        recommendations.append("Rozkład jest skośny - rozważ transformację log/sqrt")
+            except:
+                pass
         
-        # Rekomendacje dla duplikatów
-        duplicates = self.df.duplicated().sum()
-        if duplicates > 0:
-            recommendations.append(f"Usuń {duplicates} duplikaty wierszy")
+        elif column_type == ColumnType.ID:
+            recommendations.append("Kolumna ID - usuń przed trenowaniem modelu")
         
         if not recommendations:
-            recommendations.append("Dane wyglądają na dobrze przygotowane do analizy")
+            recommendations.append("Kolumna wygląda poprawnie")
         
         return recommendations
 
 # ============================================================================
-# PRZYKŁAD UŻYCIA I FACTORY
+# SMART DATA PREPROCESSOR
 # ============================================================================
 
-class EDAFactory:
-    """Factory do tworzenia komponentów EDA."""
+class SmartDataPreprocessor:
+    """Inteligentny preprocessor danych z konfigurowalnymi opcjami."""
     
-    @staticmethod
-    def create_preprocessor(config: Optional[PreprocessingConfig] = None) -> SmartDataPreprocessor:
-        """Tworzy preprocessor z domyślną lub custom konfiguracją."""
-        return SmartDataPreprocessor(config)
+    def __init__(self, config: Optional[PreprocessingConfig] = None):
+        self.config = config or PreprocessingConfig()
+        self.analyzer = AdvancedColumnAnalyzer()
     
-    @staticmethod
-    def create_custom_pipeline(steps: List[str], config: Optional[PreprocessingConfig] = None) -> PreprocessingPipeline:
-        """Tworzy custom pipeline z wybranymi krokami."""
-        pipeline = PreprocessingPipeline(config or PreprocessingConfig())
+    def preprocess(self, df: pd.DataFrame, target_column: Optional[str] = None) -> Tuple[pd.DataFrame, PreprocessingReport]:
+        """Główna metoda preprocessingu."""
         
-        # Mapowanie nazw kroków na transformatory
-        step_mapping = {
-            'remove_empty': RemoveEmptyColumnsTransformer(),
-            'remove_constant': RemoveConstantColumnsTransformer(),
-            'datetime': DateTimeTransformer(),
-            'duplicates': DuplicateRemovalTransformer(),
-            'high_cardinality': HighCardinalityTransformer(),
-            'outliers': OutlierTransformer(),
-            'missing_values': MissingValueTransformer()
-        }
+        start_time = time.time()
+        original_shape = df.shape
+        report = PreprocessingReport(original_shape=original_shape, final_shape=original_shape)
         
-        # Wyczyść domyślny pipeline i dodaj wybrane kroki
-        pipeline.transformers = []
-        for step in steps:
-            if step in step_mapping:
-                pipeline.add_transformer(step_mapping[step])
+        # Kopia danych
+        df_processed = df.copy()
         
-        return pipeline
+        try:
+            # 1. Usuń duplikaty
+            if self.config.remove_duplicates:
+                before_rows = len(df_processed)
+                df_processed = df_processed.drop_duplicates()
+                after_rows = len(df_processed)
+                if before_rows != after_rows:
+                    report.transformations['duplicates_removed'] = before_rows - after_rows
+            
+            # 2. Analizuj kolumny
+            column_analyses = self.analyzer.analyze_dataset(df_processed)
+            
+            # 3. Usuń kolumny stałe i z dużymi brakami
+            df_processed, dropped_constant = self._remove_constant_columns(df_processed)
+            df_processed, dropped_missing = self._remove_high_missing_columns(df_processed)
+            
+            report.dropped_columns['constant'] = dropped_constant
+            report.dropped_columns['high_missing'] = dropped_missing
+            
+            # 4. Parsuj daty i twórz cechy czasowe
+            if self.config.parse_dates:
+                df_processed, date_features = self._process_date_columns(df_processed, column_analyses)
+                report.created_columns.extend(date_features)
+            
+            # 5. Obsłuż kategorie wysokiej kardinalności
+            df_processed = self._handle_high_cardinality_categories(df_processed, column_analyses)
+            
+            # 6. Imputacja braków danych
+            if self.config.handle_missing:
+                df_processed = self._impute_missing_values(df_processed, target_column)
+                report.transformations['missing_imputed'] = True
+            
+            # 7. Obsłuż wartości odstające
+            if self.config.enable_outlier_treatment:
+                df_processed = self._handle_outliers(df_processed, column_analyses, target_column)
+                report.transformations['outliers_treated'] = True
+            
+            # Finalizuj raport
+            report.final_shape = df_processed.shape
+            report.processing_time = time.time() - start_time
+            
+        except Exception as e:
+            logger.error(f"Błąd podczas preprocessingu: {e}")
+            report.warnings.append(f"Błąd preprocessingu: {e}")
+            # Zwróć oryginalne dane w przypadku błędu
+            df_processed = df.copy()
+        
+        return df_processed, report
     
-    @staticmethod
-    def create_report_generator(df: pd.DataFrame, config: Optional[PreprocessingConfig] = None) -> EDAReportGenerator:
-        """Tworzy generator raportów EDA."""
-        preprocessor = EDAFactory.create_preprocessor(config)
-        return EDAReportGenerator(df, preprocessor)
+    def _remove_constant_columns(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+        """Usuwa kolumny z stałymi wartościami."""
+        
+        dropped = []
+        for col in df.columns:
+            try:
+                unique_ratio = df[col].nunique() / len(df)
+                if unique_ratio < (1 - self.config.drop_constant_threshold):
+                    dropped.append(col)
+            except:
+                pass
+        
+        if dropped:
+            df = df.drop(columns=dropped)
+            logger.info(f"Usunięto kolumny stałe: {dropped}")
+        
+        return df, dropped
+    
+    def _remove_high_missing_columns(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+        """Usuwa kolumny z dużą liczbą braków."""
+        
+        dropped = []
+        for col in df.columns:
+            missing_ratio = df[col].isna().sum() / len(df)
+            if missing_ratio > self.config.drop_missing_threshold:
+                dropped.append(col)
+        
+        if dropped:
+            df = df.drop(columns=dropped)
+            logger.info(f"Usunięto kolumny z dużymi brakami: {dropped}")
+        
+        return df, dropped
+    
+    def _process_date_columns(self, df: pd.DataFrame, analyses: List[ColumnAnalysis]) -> Tuple[pd.DataFrame, List[str]]:
+        """Parsuje daty i tworzy cechy czasowe."""
+        
+        created_features = []
+        
+        for analysis in analyses:
+            if analysis.column_type == ColumnType.DATETIME:
+                col = analysis.name
+                try:
+                    # Parsuj datę
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+                    
+                    if self.config.create_date_features:
+                        # Twórz cechy czasowe
+                        if 'year' in self.config.date_features:
+                            df[f"{col}_year"] = df[col].dt.year
+                            created_features.append(f"{col}_year")
+                        
+                        if 'month' in self.config.date_features:
+                            df[f"{col}_month"] = df[col].dt.month
+                            created_features.append(f"{col}_month")
+                        
+                        if 'day' in self.config.date_features:
+                            df[f"{col}_day"] = df[col].dt.day
+                            created_features.append(f"{col}_day")
+                        
+                        if 'dayofweek' in self.config.date_features:
+                            df[f"{col}_dayofweek"] = df[col].dt.dayofweek
+                            created_features.append(f"{col}_dayofweek")
+                        
+                        if 'quarter' in self.config.date_features:
+                            df[f"{col}_quarter"] = df[col].dt.quarter
+                            created_features.append(f"{col}_quarter")
+                        
+                        if 'is_weekend' in self.config.date_features:
+                            df[f"{col}_is_weekend"] = (df[col].dt.dayofweek >= 5).astype(int)
+                            created_features.append(f"{col}_is_weekend")
+                
+                except Exception as e:
+                    logger.warning(f"Błąd przetwarzania daty w kolumnie {col}: {e}")
+        
+        return df, created_features
+    
+    def _handle_high_cardinality_categories(self, df: pd.DataFrame, analyses: List[ColumnAnalysis]) -> pd.DataFrame:
+        """Obsługuje kategorie wysokiej kardinalności."""
+        
+        for analysis in analyses:
+            if analysis.column_type == ColumnType.CATEGORY and analysis.unique_count > self.config.category_threshold:
+                col = analysis.name
+                try:
+                    # Zachowaj top N kategorii, resztę grupuj jako "Other"
+                    top_categories = df[col].value_counts().head(self.config.max_categories).index.tolist()
+                    df[col] = df[col].apply(lambda x: x if x in top_categories else "Other")
+                    logger.info(f"Ograniczono kardinalność kolumny {col} do {self.config.max_categories} kategorii")
+                except Exception as e:
+                    logger.warning(f"Błąd ograniczania kardinalności w kolumnie {col}: {e}")
+        
+        return df
+    
+    def _impute_missing_values(self, df: pd.DataFrame, target_column: Optional[str] = None) -> pd.DataFrame:
+        """Imputuje brakujące wartości."""
+        
+        for col in df.columns:
+            if col == target_column:
+                continue  # Nie imputuj targetu
+            
+            if df[col].isna().sum() == 0:
+                continue  # Brak braków
+            
+            try:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    # Imputacja numeryczna
+                    if self.config.numeric_imputation == "mean":
+                        df[col] = df[col].fillna(df[col].mean())
+                    elif self.config.numeric_imputation == "median":
+                        df[col] = df[col].fillna(df[col].median())
+                    elif self.config.numeric_imputation == "mode":
+                        mode_val = df[col].mode()
+                        if len(mode_val) > 0:
+                            df[col] = df[col].fillna(mode_val.iloc[0])
+                
+                else:
+                    # Imputacja kategoryczna
+                    if self.config.categorical_imputation == "mode":
+                        mode_val = df[col].mode()
+                        if len(mode_val) > 0:
+                            df[col] = df[col].fillna(mode_val.iloc[0])
+                    elif self.config.categorical_imputation == "constant":
+                        df[col] = df[col].fillna(self.config.constant_value)
+                        
+            except Exception as e:
+                logger.warning(f"Błąd imputacji w kolumnie {col}: {e}")
+        
+        return df
+    
+    def _handle_outliers(self, df: pd.DataFrame, analyses: List[ColumnAnalysis], target_column: Optional[str] = None) -> pd.DataFrame:
+        """Obsługuje wartości odstające."""
+        
+        for analysis in analyses:
+            if analysis.column_type in [ColumnType.NUMERIC, ColumnType.PRICE, ColumnType.VOLUME]:
+                col = analysis.name
+                
+                if col == target_column:
+                    continue  # Nie modyfikuj targetu
+                
+                try:
+                    if self.config.outlier_method == "winsorize":
+                        lower = df[col].quantile(self.config.lower_quantile)
+                        upper = df[col].quantile(self.config.upper_quantile)
+                        df[col] = df[col].clip(lower=lower, upper=upper)
+                    
+                    elif self.config.outlier_method == "clip":
+                        Q1 = df[col].quantile(0.25)
+                        Q3 = df[col].quantile(0.75)
+                        IQR = Q3 - Q1
+                        lower = Q1 - 1.5 * IQR
+                        upper = Q3 + 1.5 * IQR
+                        df[col] = df[col].clip(lower=lower, upper=upper)
+                    
+                    elif self.config.outlier_method == "remove":
+                        Q1 = df[col].quantile(0.25)
+                        Q3 = df[col].quantile(0.75)
+                        IQR = Q3 - Q1
+                        lower = Q1 - 1.5 * IQR
+                        upper = Q3 + 1.5 * IQR
+                        df = df[(df[col] >= lower) & (df[col] <= upper)]
+                        
+                except Exception as e:
+                    logger.warning(f"Błąd obsługi outlierów w kolumnie {col}: {e}")
+        
+        return df
 
-# Przykład użycia nowych funkcji
-if __name__ == "__main__":
-    # Przykład użycia nowego pipeline
+# ============================================================================
+# KOMPATYBILNOŚĆ WSTECZNA - ORYGINALNE FUNKCJE
+# ============================================================================
+
+@st.cache_data
+def describe_column(column_name: str, sample_values: list, unique_count: int, 
+                   missing_count: int, dtype: str, use_llm: bool = False) -> str:
+    """Opisuje kolumnę - kompatybilność wsteczna."""
+    
+    analyzer = AdvancedColumnAnalyzer(enable_llm=use_llm)
+    
+    # Stwórz tymczasową serię dla analizy
+    sample_series = pd.Series(sample_values + [np.nan] * missing_count)
+    
+    try:
+        analysis = analyzer.analyze_column(sample_series, column_name)
+        return analysis.description
+    except Exception as e:
+        logger.warning(f"Błąd opisu kolumny {column_name}: {e}")
+        return f"Kolumna {column_name} typu {dtype} z {unique_count} unikalnymi wartościami."
+
+def smart_data_summary(df: pd.DataFrame) -> Dict[str, Any]:
+    """Inteligentne podsumowanie danych - kompatybilność wsteczna."""
+    
+    analyzer = AdvancedColumnAnalyzer()
+    analyses = analyzer.analyze_dataset(df)
+    
+    # Klasyfikuj kolumny
+    summary = {
+        'basic_info': {
+            'rows': len(df),
+            'columns': len(df.columns),
+            'memory_usage': df.memory_usage(deep=True).sum(),
+            'duplicates': df.duplicated().sum()
+        },
+        'columns_by_type': {},
+        'data_quality': {
+            'excellent': 0,
+            'good': 0,
+            'fair': 0,
+            'poor': 0
+        },
+        'missing_data': {},
+        'recommendations': []
+    }
+    
+    # Grupuj według typu
+    for analysis in analyses:
+        col_type = analysis.column_type.value
+        if col_type not in summary['columns_by_type']:
+            summary['columns_by_type'][col_type] = []
+        summary['columns_by_type'][col_type].append(analysis.name)
+        
+        # Jakość danych
+        summary['data_quality'][analysis.quality.value] += 1
+        
+        # Braki danych
+        if analysis.missing_percentage > 0:
+            summary['missing_data'][analysis.name] = analysis.missing_percentage
+    
+    # Globalne rekomendacje
+    poor_quality_cols = [a.name for a in analyses if a.quality == DataQuality.POOR]
+    if poor_quality_cols:
+        summary['recommendations'].append(f"Sprawdź jakość kolumn: {', '.join(poor_quality_cols[:3])}")
+    
+    high_missing_cols = [a.name for a in analyses if a.missing_percentage > 30]
+    if high_missing_cols:
+        summary['recommendations'].append(f"Kolumny z dużymi brakami: {', '.join(high_missing_cols[:3])}")
+    
+    return summary
+
+def auto_prepare_data(df: pd.DataFrame, target_column: str, 
+                     create_date_features: bool = True,
+                     handle_outliers: bool = True,
+                     max_categories: int = 30) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Automatyczne przygotowanie danych - kompatybilność wsteczna."""
+    
+    # Stwórz konfigurację na podstawie parametrów
     config = PreprocessingConfig(
-        remove_duplicates=True,
-        enable_outlier_treatment=True,
-        outlier_method='winsorize',
-        create_date_features=True,
-        max_categories=25
+        create_date_features=create_date_features,
+        enable_outlier_treatment=handle_outliers,
+        max_categories=max_categories
     )
     
-    # Stwórz preprocessor
     preprocessor = SmartDataPreprocessor(config)
+    df_processed, report = preprocessor.preprocess(df, target_column)
     
-    # Lub stwórz custom pipeline
-    custom_pipeline = EDAFactory.create_custom_pipeline(
-        ['remove_constant', 'datetime', 'missing_values'],
-        config
-    )
+    # Konwertuj raport do starego formatu
+    old_format_report = {
+        'original_shape': report.original_shape,
+        'final_shape': report.final_shape,
+        'processing_time': report.processing_time,
+        'changes': {
+            'dropped_columns': sum(len(cols) for cols in report.dropped_columns.values()),
+            'created_columns': len(report.created_columns),
+            'transformations': report.transformations
+        },
+        'summary': report.summary()
+    }
     
-    # Przykład użycia (gdyby był DataFrame)
-    # df_processed, report = preprocessor.fit_transform(df, target_column='price')
-    # print(f"Preprocessing completed in {report.processing_time:.2f}s")
-    # print("Summary:", preprocessor.get_preprocessing_summary(report))
+    return df_processed, old_format_report
+
+# ============================================================================
+# UTILITIES I HELPER FUNCTIONS
+# ============================================================================
+
+def assess_data_quality(df: pd.DataFrame) -> Dict[str, Any]:
+    """Ocenia jakość całego datasetu."""
+    
+    analyzer = AdvancedColumnAnalyzer()
+    analyses = analyzer.analyze_dataset(df)
+    
+    # Zlicz jakość kolumn
+    quality_counts = {quality.value: 0 for quality in DataQuality}
+    for analysis in analyses:
+        quality_counts[analysis.quality.value] += 1
+    
+    # Oblicz ogólny score jakości
+    total_cols = len(analyses)
+    quality_score = (
+        quality_counts['excellent'] * 1.0 +
+        quality_counts['good'] * 0.7 +
+        quality_counts['fair'] * 0.4 +
+        quality_counts['poor'] * 0.0
+    ) / total_cols if total_cols > 0 else 0.0
+    
+    return {
+        'overall_quality_score': quality_score,
+        'quality_distribution': quality_counts,
+        'total_columns': total_cols,
+        'problematic_columns': [a.name for a in analyses if a.quality == DataQuality.POOR],
+        'missing_data_issues': [a.name for a in analyses if a.missing_percentage > 50],
+        'recommendations': _generate_dataset_recommendations(analyses)
+    }
+
+def _generate_dataset_recommendations(analyses: List[ColumnAnalysis]) -> List[str]:
+    """Generuje rekomendacje dla całego datasetu."""
+    
+    recommendations = []
+    
+    # Problemy z jakością
+    poor_cols = [a for a in analyses if a.quality == DataQuality.POOR]
+    if poor_cols:
+        recommendations.append(f"Usuń lub napraw {len(poor_cols)} kolumn niskiej jakości")
+    
+    # Braki danych
+    high_missing = [a for a in analyses if a.missing_percentage > 30]
+    if high_missing:
+        recommendations.append(f"Zastosuj imputację dla {len(high_missing)} kolumn z dużymi brakami")
+    
+    # Kategorie wysokiej kardinalności
+    high_card = [a for a in analyses if a.column_type == ColumnType.CATEGORY and a.unique_count > 50]
+    if high_card:
+        recommendations.append(f"Ogranicz kardinalność {len(high_card)} kolumn kategorycznych")
+    
+    # Potencjalne ID
+    id_cols = [a for a in analyses if a.column_type == ColumnType.ID]
+    if id_cols:
+        recommendations.append(f"Usuń {len(id_cols)} kolumn identyfikacyjnych przed treningiem")
+    
+    if not recommendations:
+        recommendations.append("Dataset wygląda dobrze przygotowany!")
+    
+    return recommendations
+
+def get_preprocessing_config(advanced: bool = False) -> PreprocessingConfig:
+    """Zwraca konfigurację preprocessingu."""
+    
+    if advanced:
+        return PreprocessingConfig(
+            remove_duplicates=True,
+            handle_missing=True,
+            drop_constant_threshold=0.98,
+            drop_missing_threshold=0.80,
+            max_categories=50,
+            enable_outlier_treatment=True,
+            outlier_method="winsorize",
+            create_date_features=True,
+            date_features=["year", "month", "day", "dayofweek", "quarter", "is_weekend"]
+        )
+    else:
+        return PreprocessingConfig()
+
+# ============================================================================
+# TESTOWANIE I DEMO
+# ============================================================================
+
+def demo_analysis():
+    """Demonstracja możliwości analizatora."""
+    
+    # Stwórz przykładowe dane
+    np.random.seed(42)
+    demo_data = {
+        'id': range(1000),
+        'name': [f'Product_{i}' for i in range(1000)],
+        'category': np.random.choice(['A', 'B', 'C'], 1000),
+        'price': np.random.lognormal(3, 1, 1000),
+        'date_created': pd.date_range('2023-01-01', periods=1000, freq='D'),
+        'is_active': np.random.choice([True, False], 1000),
+        'description': [f'Opis produktu {i}' for i in range(1000)]
+    }
+    
+    # Dodaj braki danych
+    demo_data['price'][::10] = np.nan  # 10% braków
+    demo_data['description'][::5] = np.nan  # 20% braków
+    
+    df = pd.DataFrame(demo_data)
+    
+    print("=== DEMO: Advanced Column Analyzer ===")
+    
+    # Analiza kolumn
+    analyzer = AdvancedColumnAnalyzer()
+    analyses = analyzer.analyze_dataset(df)
+    
+    for analysis in analyses:
+        print(f"\n🔍 Kolumna: {analysis.name}")
+        print(f"   Typ: {analysis.column_type.value}")
+        print(f"   Jakość: {analysis.quality.value}")
+        print(f"   Opis: {analysis.description}")
+        if analysis.recommendations:
+            print(f"   Rekomendacje: {analysis.recommendations[0]}")
+    
+    # Preprocessing
+    print("\n=== DEMO: Smart Data Preprocessor ===")
+    
+    preprocessor = SmartDataPreprocessor()
+    df_processed, report = preprocessor.preprocess(df, 'price')
+    
+    print(f"Kształt przed: {report.original_shape}")
+    print(f"Kształt po: {report.final_shape}")
+    print(f"Czas: {report.processing_time:.2f}s")
+    print(f"Utworzone kolumny: {len(report.created_columns)}")
+    
+    return df_processed, report
+
+if __name__ == "__main__":
+    # Uruchom demo
+    demo_analysis()
