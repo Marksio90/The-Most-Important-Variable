@@ -1,7 +1,7 @@
 # ml_integration.py — TMIV: trenowanie, metryki, FI, artefakty (sklearn + opcjonalnie LGBM/XGB/CB)
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
@@ -21,9 +21,7 @@ from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score, confusion_matrix
 )
 
-from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import (
-    RandomForestRegressor, RandomForestClassifier,
     HistGradientBoostingRegressor, HistGradientBoostingClassifier
 )
 
@@ -39,7 +37,7 @@ XGB = _soft_import("xgboost")
 LGBM = _soft_import("lightgbm")
 CATB = _soft_import("catboost")
 
-# Utils (nasze) - naprawiony import
+# Utils (nasze)
 from backend.utils import (
     seed_everything, infer_problem_type,
     hash_dataframe_signature
@@ -55,12 +53,12 @@ class ModelConfig:
     target: str
     engine: EngineName = "auto"
     test_size: float = 0.2
-    cv_folds: int = 3  # (opcjonalnie użyjesz później; teraz split + holdout)
+    cv_folds: int = 3  # (na przyszłość; obecnie holdout)
     random_state: int = 42
     stratify: bool = True
     # ewentualne flagi
     enable_probabilities: bool = True
-    max_categories: int = 200  # odcięcie rzadkich kategorii (opcjonalnie do future work)
+    max_categories: int = 200  # odcięcie rzadkich kategorii (na przyszłość)
 
 @dataclass
 class TrainingResult:
@@ -102,7 +100,7 @@ def train_model_comprehensive(
     # Detekcja problemu (heurystyka)
     problem_type = infer_problem_type(df, cfg.target).lower()
     if problem_type not in ("regression", "classification"):
-        # fallback: jeśli numeric i >=3 unikatowe -> regression, w przeciwnym razie classification
+        # fallback: numeric & >=3 unikatowe -> regression, inaczej classification
         if pd.api.types.is_numeric_dtype(y) and y.nunique(dropna=True) >= 3:
             problem_type = "regression"
         else:
@@ -112,13 +110,20 @@ def train_model_comprehensive(
     num_cols = X.select_dtypes(include=["number", "float", "int", "float64", "int64"]).columns.tolist()
     cat_cols = [c for c in X.columns if c not in num_cols]
 
+    # OneHotEncoder kompatybilny ze starszym sklearn (sparse_output vs sparse)
+    def _ohe_safe() -> OneHotEncoder:
+        try:
+            return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        except TypeError:  # starsze sklearn
+            return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
     # Preprocessing
     num_tr = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
     ])
     cat_tr = Pipeline([
         ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("ohe", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+        ("ohe", _ohe_safe())
     ])
 
     preprocessor = ColumnTransformer(
@@ -142,8 +147,19 @@ def train_model_comprehensive(
         ("model", model)
     ])
 
-    # Split
-    stratify_param = y if (problem_type == "classification" and cfg.stratify and y.nunique() > 1) else None
+    # ---------- Split (bezpieczny dla rzadkich klas) ----------
+    warnings_local: List[str] = []
+    stratify_param = None
+    if problem_type == "classification" and cfg.stratify:
+        class_counts = y.value_counts()
+        min_class = int(class_counts.min()) if len(class_counts) > 0 else 0
+        if y.nunique() > 1 and min_class >= 2:
+            stratify_param = y
+        else:
+            warnings_local.append(
+                f"Wyłączono stratify przy train/test — najmniej liczna klasa ma {min_class} próbek."
+            )
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=cfg.test_size,
@@ -151,8 +167,34 @@ def train_model_comprehensive(
         stratify=stratify_param
     )
 
-    # Fit
-    pipe.fit(X_train, y_train)
+    # Jeśli w klasyfikacji train ma tylko jedną klasę → fallback na Dummy
+    from sklearn.dummy import DummyClassifier, DummyRegressor
+    if problem_type == "classification" and pd.Series(y_train).nunique() <= 1:
+        warnings_local.append(
+            "Zbiór treningowy ma jedną klasę — użyto DummyClassifier(strategy='most_frequent')."
+        )
+        pipe = Pipeline([
+            ("prep", preprocessor),
+            ("model", DummyClassifier(strategy="most_frequent"))
+        ])
+
+    # ---------- Fit (z zabezpieczeniem) ----------
+    try:
+        pipe.fit(X_train, y_train)
+    except Exception as fit_err:
+        # Miękki fallback (np. gdy model nie radzi sobie z danymi)
+        warnings_local.append(f"Fallback na Dummy z powodu błędu treningu: {type(fit_err).__name__}.")
+        if problem_type == "classification":
+            pipe = Pipeline([
+                ("prep", preprocessor),
+                ("model", DummyClassifier(strategy="most_frequent"))
+            ])
+        else:
+            pipe = Pipeline([
+                ("prep", preprocessor),
+                ("model", DummyRegressor(strategy="mean"))
+            ])
+        pipe.fit(X_train, y_train)
 
     # Predict
     y_pred = pipe.predict(X_test)
@@ -177,6 +219,8 @@ def train_model_comprehensive(
         "validation_info": validation_info,
         "data_signature": hash_dataframe_signature(df)
     }
+    if warnings_local:
+        meta["warnings"] = warnings_local
 
     return TrainingResult(
         model=pipe,
@@ -216,7 +260,7 @@ def load_model_artifacts(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
         raise RuntimeError(f"Brak joblib do odczytu modelu: {e}")
 
     model = joblib.load(run_dir / "model.joblib")
-    meta = json.loads((run_dir / "meta.json").read_text())
+    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
     return model, meta
 
 
@@ -263,7 +307,7 @@ def _build_model(engine: str, problem_type: str, random_state: int):
 
     # sklearn (domyślnie)
     if problem_type == "regression":
-        # szybki i dość mocny baseline (na rozmaite dane)
+        # szybki i dość mocny baseline
         return HistGradientBoostingRegressor(random_state=random_state)
     else:
         # baseline klasyfikacyjny
@@ -302,14 +346,15 @@ def _compute_metrics(
             "f1_macro": f1
         })
 
-        # ROC-AUC (tylko dla binarnej / wieloklasowej z proba + ovo/ovr)
+        # ROC-AUC (tylko dla przypadków z predict_proba i sensowną liczbą klas)
         try:
-            if cfg.enable_probabilities and hasattr(pipe["model"], "predict_proba"):
+            if cfg.enable_probabilities and hasattr(pipe.named_steps["model"], "predict_proba"):
                 proba = pipe.predict_proba(X_test)
                 if proba is not None:
                     if proba.ndim == 1 or proba.shape[1] == 2:
                         # AUC dla klasy 1 (binarna)
                         pos = proba[:, 1] if proba.ndim > 1 else proba
+                        # może się wywalić, jeśli y_true ma jedną klasę → try/except wyżej
                         auc = float(roc_auc_score(y_true, pos))
                         metrics["roc_auc"] = auc
                     else:
@@ -372,7 +417,7 @@ def _extract_feature_importance(
     if importances is None and hasattr(model, "coef_"):
         coef = getattr(model, "coef_")
         if isinstance(coef, np.ndarray):
-            # multiclass -> weź średnią po klasach
+            # multiclass -> średnia wartości bezwzględnych po klasach
             if coef.ndim > 1:
                 coef = np.mean(np.abs(coef), axis=0)
             importances = np.abs(coef)
