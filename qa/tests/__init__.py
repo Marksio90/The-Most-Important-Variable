@@ -1,0 +1,3 @@
+"""
+Testy jednostkowe i integracyjne.
+"""
