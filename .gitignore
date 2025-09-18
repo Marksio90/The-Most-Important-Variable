@@ -1,24 +1,13 @@
-# Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.egg-info/
-.venv/
-.env
-.env.*
-.DS_Store
-
-# Streamlit
-.streamlit/
-
-# Outputs
+.Python
+.pytest_cache/
+.mypy_cache/
+.coverage
 tmiv_out/
-models/
-artifacts/
-*.joblib
-*.pkl
-
-# VSCode / notebooks
-.vscode/
-.ipynb_checkpoints/
+*.sqlite
+*.db
+.env
+.venv/
