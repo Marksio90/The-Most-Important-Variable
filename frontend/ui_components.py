@@ -11,7 +11,7 @@ import streamlit as st
 
 # Opcjonalna integracja z rozszerzonym uploaderem
 try:
-    from file_upload import SmartFileUploader, UploadConfig
+    from backend.file_upload import SmartFileUploader, UploadConfig
     HAS_SMART_UPLOADER = True
 except Exception:
     SmartFileUploader = None  # type: ignore
@@ -44,7 +44,7 @@ class UIConfig:
 class TMIVApp:
     """
     Warstwa widżetów dla danych i podstawowego EDA.
-    Zapewnia jeden, spójny „wejściowy” krok:
+    Zapewnia jeden, spójny „wejściowy" krok:
       - wybór źródła: plik lub demo
       - walidacja i podgląd
       - gotowy DataFrame + nazwa
