@@ -36,6 +36,129 @@ from sklearn.feature_selection import (
     SelectKBest, f_classif, f_regression
 )
 
+# Dodaj po istniejących importach
+try:
+    import pycaret
+    from pycaret.regression import setup as reg_setup, compare_models as reg_compare, finalize_model as reg_finalize
+    from pycaret.classification import setup as clf_setup, compare_models as clf_compare, finalize_model as clf_finalize
+    from pycaret.regression import pull as reg_pull
+    from pycaret.classification import pull as clf_pull
+    HAVE_PYCARET = True
+except ImportError:
+    HAVE_PYCARET = False
+
+# Dodaj nową klasę PyCaret trainer
+class PyCaretTrainer(BaseModelTrainer):
+    """Trainer using PyCaret for automated ML."""
+    
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+    
+    def create_model(self, problem_type: str, **kwargs) -> BaseEstimator:
+        """PyCaret doesn't use single model creation - handled in train method."""
+        pass
+    
+    def get_param_grid(self) -> Dict[str, Any]:
+        """PyCaret handles hyperparameter tuning internally."""
+        return {}
+    
+    def train_with_pycaret(self, X: pd.DataFrame, y: pd.Series, problem_type: str) -> Tuple[Any, Dict[str, float], pd.DataFrame]:
+        """Train model using PyCaret's automated pipeline."""
+        
+        # Combine X and y for PyCaret
+        df_combined = X.copy()
+        df_combined['target'] = y
+        
+        try:
+            if problem_type == "classification":
+                # Setup PyCaret classification
+                clf_exp = clf_setup(
+                    data=df_combined,
+                    target='target',
+                    session_id=self.random_state,
+                    train_size=0.8,
+                    silent=True,
+                    verbose=False
+                )
+                
+                # Compare models and get best
+                best_models = clf_compare(
+                    include=['rf', 'lr', 'xgboost', 'lightgbm', 'dt'],
+                    sort='Accuracy',
+                    n_select=1,
+                    verbose=False
+                )
+                
+                # Get metrics
+                results_df = clf_pull()
+                best_model = clf_finalize(best_models)
+                
+                # Extract metrics
+                metrics = {
+                    'accuracy': float(results_df['Accuracy'].iloc[0]),
+                    'auc': float(results_df.get('AUC', [0]).iloc[0]),
+                    'recall': float(results_df.get('Recall', [0]).iloc[0]),
+                    'precision': float(results_df.get('Prec.', [0]).iloc[0]),
+                    'f1': float(results_df.get('F1', [0]).iloc[0])
+                }
+                
+            else:  # regression
+                # Setup PyCaret regression
+                reg_exp = reg_setup(
+                    data=df_combined,
+                    target='target',
+                    session_id=self.random_state,
+                    train_size=0.8,
+                    silent=True,
+                    verbose=False
+                )
+                
+                # Compare models and get best
+                best_models = reg_compare(
+                    include=['rf', 'lr', 'xgboost', 'lightgbm', 'dt'],
+                    sort='R2',
+                    n_select=1,
+                    verbose=False
+                )
+                
+                # Get metrics
+                results_df = reg_pull()
+                best_model = reg_finalize(best_models)
+                
+                # Extract metrics
+                metrics = {
+                    'r2': float(results_df['R2'].iloc[0]),
+                    'mae': float(results_df['MAE'].iloc[0]),
+                    'mse': float(results_df['MSE'].iloc[0]),
+                    'rmse': float(results_df['RMSE'].iloc[0]),
+                    'mape': float(results_df.get('MAPE', [0]).iloc[0])
+                }
+            
+            # Extract feature importance
+            try:
+                if hasattr(best_model, 'feature_importances_'):
+                    importance_values = best_model.feature_importances_
+                elif hasattr(best_model, 'coef_'):
+                    importance_values = np.abs(best_model.coef_).flatten()
+                else:
+                    importance_values = np.ones(len(X.columns))  # Fallback
+                
+                feature_importance = pd.DataFrame({
+                    'feature': X.columns,
+                    'importance': importance_values
+                }).sort_values('importance', ascending=False)
+                
+            except Exception:
+                feature_importance = pd.DataFrame({
+                    'feature': X.columns,
+                    'importance': np.ones(len(X.columns))
+                }).sort_values('importance', ascending=False)
+            
+            return best_model, metrics, feature_importance
+            
+        except Exception as e:
+            raise RuntimeError(f"PyCaret training failed: {str(e)}")
+
 # Optional engines with fallbacks
 HAVE_LGBM = HAVE_XGB = HAVE_CAT = HAVE_OPTUNA = False
 try:
@@ -501,19 +624,15 @@ class ModelFactory:
             'lightgbm': LightGBMTrainer if HAVE_LGBM else SklearnTrainer,
             'xgboost': XGBoostTrainer if HAVE_XGB else SklearnTrainer,
             'catboost': CatBoostTrainer if HAVE_CAT else SklearnTrainer,
+            'pycaret': PyCaretTrainer if HAVE_PYCARET else SklearnTrainer,  # DODANE
+            'auto_pycaret': PyCaretTrainer if HAVE_PYCARET else SklearnTrainer,  # DODANE
         }
-    
-    def get_trainer(self, engine: str, random_state: int = 42) -> BaseModelTrainer:
-        """Get appropriate trainer for engine."""
-        if engine == "auto":
-            engine = self._select_auto_engine()
-        
-        trainer_class = self.trainers.get(engine, SklearnTrainer)
-        return trainer_class(random_state=random_state)
-    
+
     def _select_auto_engine(self) -> str:
-        """Automatically select best available engine."""
-        if HAVE_LGBM:
+        """Automatically select best available engine - prefer PyCaret."""
+        if HAVE_PYCARET:
+            return 'auto_pycaret'  # ZMIENIONE: Preferuj PyCaret
+        elif HAVE_LGBM:
             return 'lightgbm'
         elif HAVE_XGB:
             return 'xgboost'
@@ -680,8 +799,56 @@ class MLTrainingOrchestrator:
             
             # Step 6: Create and train model
             trainer = self.model_factory.get_trainer(self.config.engine, self.config.random_state)
-            model = trainer.create_model(problem_type)
-            
+
+            # DODANE: Specjalna obsługa dla PyCaret
+            if isinstance(trainer, PyCaretTrainer) and HAVE_PYCARET:
+                st.write("🚀 Użycie PyCaret - porównanie wielu algorytmów...")
+                
+                try:
+                    model, metrics, feature_importance = trainer.train_with_pycaret(
+                        X_train, y_train, problem_type
+                    )
+                    
+                    # Skip regular pipeline creation for PyCaret
+                    full_pipeline = model
+                    
+                except Exception as e:
+                    st.warning(f"PyCaret failed: {e}. Fallback to sklearn...")
+                    # Fallback to regular training
+                    model = trainer.create_model(problem_type)
+                    preprocessor_pipeline = self._create_sklearn_preprocessor(X_train)
+                    full_pipeline = Pipeline([
+                        ('preprocessor', preprocessor_pipeline),
+                        ('estimator', model)
+                    ])
+                    full_pipeline.fit(X_train, y_train)
+                    
+                    # Generate predictions for fallback
+                    y_pred = full_pipeline.predict(X_test)
+                    y_proba = None
+                    
+                    if problem_type == "classification" and hasattr(full_pipeline, "predict_proba"):
+                        try:
+                            proba_output = full_pipeline.predict_proba(X_test)
+                            if proba_output.shape[1] == 2:
+                                y_proba = proba_output[:, 1]
+                        except Exception:
+                            pass
+                    
+                    metrics = self.metrics_calculator.calculate_metrics(y_test, y_pred, y_proba, problem_type)
+                    feature_names = list(X.columns)
+                    feature_importance = self.importance_extractor.extract_importance(full_pipeline, feature_names)
+
+            else:
+                # Regular training for non-PyCaret engines
+                model = trainer.create_model(problem_type)
+                preprocessor_pipeline = self._create_sklearn_preprocessor(X_train)
+                full_pipeline = Pipeline([
+                    ('preprocessor', preprocessor_pipeline),
+                    ('estimator', model)
+                ])
+                full_pipeline.fit(X_train, y_train)
+                        
             # Step 7: Create preprocessing pipeline
             preprocessor_pipeline = self._create_sklearn_preprocessor(X_train)
             full_pipeline = Pipeline([
