@@ -35,8 +35,6 @@ from sklearn.feature_selection import (
     mutual_info_classif, mutual_info_regression, 
     SelectKBest, f_classif, f_regression
 )
-
-# Dodaj po istniejących importach
 try:
     import pycaret
     from pycaret.regression import setup as reg_setup, compare_models as reg_compare, finalize_model as reg_finalize
@@ -47,7 +45,75 @@ try:
 except ImportError:
     HAVE_PYCARET = False
 
-# Dodaj nową klasę PyCaret trainer
+@dataclass
+class ModelMetrics:
+    """Container for model performance metrics"""
+    accuracy: Optional[float] = None
+    f1: Optional[float] = None
+    roc_auc: Optional[float] = None
+    r2: Optional[float] = None
+    mae: Optional[float] = None
+    rmse: Optional[float] = None
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    balanced_accuracy: Optional[float] = None
+    mcc: Optional[float] = None
+
+class BaseModelTrainer(ABC):
+    """Abstract base class for all model trainers"""
+    
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+        self.model = None
+        self.metrics = ModelMetrics()
+        self.is_trained = False
+        
+    @abstractmethod
+    def fit(self, X: pd.DataFrame, y: pd.Series, **kwargs) -> 'BaseModelTrainer':
+        """Train the model on the provided data"""
+        pass
+    
+    @abstractmethod
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Make predictions on new data"""
+        pass
+    
+    @abstractmethod
+    def get_feature_importance(self) -> Optional[Dict[str, float]]:
+        """Get feature importance scores"""
+        pass
+    
+    def evaluate(self, X: pd.DataFrame, y: pd.Series) -> ModelMetrics:
+        """Evaluate model performance"""
+        if not self.is_trained:
+            raise ValueError("Model must be trained before evaluation")
+            
+        predictions = self.predict(X)
+        
+        # Determine if this is classification or regression
+        if len(np.unique(y)) <= 10 and y.dtype in ['int64', 'int32', 'object', 'category']:
+            # Classification metrics
+            self.metrics.accuracy = accuracy_score(y, predictions)
+            self.metrics.f1 = f1_score(y, predictions, average='weighted')
+            self.metrics.balanced_accuracy = balanced_accuracy_score(y, predictions)
+            self.metrics.mcc = matthews_corrcoef(y, predictions)
+            
+            # ROC AUC for binary classification
+            if len(np.unique(y)) == 2:
+                try:
+                    if hasattr(self.model, 'predict_proba'):
+                        proba = self.model.predict_proba(X)[:, 1]
+                        self.metrics.roc_auc = roc_auc_score(y, proba)
+                except:
+                    pass
+        else:
+            # Regression metrics
+            self.metrics.r2 = r2_score(y, predictions)
+            self.metrics.mae = mean_absolute_error(y, predictions)
+            self.metrics.rmse = np.sqrt(mean_squared_error(y, predictions))
+            
+        return self.metrics
+
 class PyCaretTrainer(BaseModelTrainer):
     """Trainer using PyCaret for automated ML."""
     
