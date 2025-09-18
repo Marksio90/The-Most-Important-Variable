@@ -18,10 +18,11 @@ except Exception:
 try:
     try:
         from pydantic_settings import BaseSettings  # v2 style
+        from pydantic import Field
         PydanticBase = BaseSettings  # type: ignore
         PYD_VER = 2
     except Exception:
-        from pydantic import BaseSettings  # type: ignore
+        from pydantic import BaseSettings, Field  # type: ignore
         PydanticBase = BaseSettings  # type: ignore
         PYD_VER = 1
     HAS_PYDANTIC = True
@@ -29,6 +30,7 @@ except Exception:
     HAS_PYDANTIC = False
     PydanticBase = object  # type: ignore
     PYD_VER = 0
+    def Field(*args, **kwargs): return None
 
 # optional: dotenv (lokalne .env podczas dev)
 try:
@@ -62,7 +64,11 @@ class _DataclassSettings:
 
     # Dane / Upload
     data_max_file_size_mb: int = 200
-    data_supported_formats: List[str] = (".csv", ".xlsx", ".xls")
+    data_supported_formats: List[str] = None
+
+    def __post_init__(self):
+        if self.data_supported_formats is None:
+            self.data_supported_formats = [".csv", ".xlsx", ".xls"]
 
     # ML / funkcje opcjonalne
     enable_shap: bool = False
@@ -94,52 +100,92 @@ class _DataclassSettings:
 #  Settings przez Pydantic
 # ==========================
 if HAS_PYDANTIC:
+    if PYD_VER == 2:
+        # Pydantic v2 - tylko model_config
+        class Settings(PydanticBase):  # type: ignore[misc]
+            # Ogólne
+            app_name: str = "TMIV"
+            app_env: str = "DEV"  # DEV | PROD
+            debug: bool = True
 
-    class Settings(PydanticBase):  # type: ignore[misc]
-        # Ogólne
-        app_name: str = "TMIV"
-        app_env: str = "DEV"  # DEV | PROD
-        debug: bool = True
+            # Dane / Upload
+            data_max_file_size_mb: int = 200
+            data_supported_formats: List[str] = Field(default_factory=lambda: [".csv", ".xlsx", ".xls"])
 
-        # Dane / Upload
-        data_max_file_size_mb: int = 200
-        data_supported_formats: List[str] = [".csv", ".xlsx", ".xls"]
+            # ML / funkcje opcjonalne
+            enable_shap: bool = False
+            enable_xgboost: bool = True
+            enable_lightgbm: bool = True
+            enable_catboost: bool = True
 
-        # ML / funkcje opcjonalne
-        enable_shap: bool = False
-        enable_xgboost: bool = True
-        enable_lightgbm: bool = True
-        enable_catboost: bool = True
+            # Trening / walidacja
+            default_random_state: int = 42
+            default_cv_folds: int = 3
+            default_test_size: float = 0.2
 
-        # Trening / walidacja
-        default_random_state: int = 42
-        default_cv_folds: int = 3
-        default_test_size: float = 0.2
+            # Telemetria / diagnostyka
+            track_telemetry: bool = False
+            show_debug_panel: bool = True
 
-        # Telemetria / diagnostyka
-        track_telemetry: bool = False
-        show_debug_panel: bool = True
+            # Ścieżki
+            output_dir: str = "tmiv_out"
+            history_db_path: str = "tmiv_out/history.sqlite"
 
-        # Ścieżki
-        output_dir: str = "tmiv_out"
-        history_db_path: str = "tmiv_out/history.sqlite"
+            # LLM
+            llm_enabled_by_default: bool = False
 
-        # LLM
-        llm_enabled_by_default: bool = False
+            # Rejestr modeli
+            models_dir: str = "tmiv_out/models"
 
-        # Rejestr modeli
-        models_dir: str = "tmiv_out/models"
+            # Pydantic v2 config
+            model_config = {
+                "env_file": ".env",
+                "env_prefix": "TMIV_",
+                "case_sensitive": False,
+                "extra": "ignore"
+            }
+    else:
+        # Pydantic v1 - tylko class Config
+        class Settings(PydanticBase):  # type: ignore[misc]
+            # Ogólne
+            app_name: str = "TMIV"
+            app_env: str = "DEV"  # DEV | PROD
+            debug: bool = True
 
-        class Config:  # pydantic v1
-            env_file = ".env"
-            env_prefix = "TMIV_"
-            case_sensitive = False
+            # Dane / Upload
+            data_max_file_size_mb: int = 200
+            data_supported_formats: List[str] = Field(default_factory=lambda: [".csv", ".xlsx", ".xls"])
 
-        model_config = {
-            "env_file": ".env",
-            "extra": "ignore"  # pydantic v2
-        }
+            # ML / funkcje opcjonalne
+            enable_shap: bool = False
+            enable_xgboost: bool = True
+            enable_lightgbm: bool = True
+            enable_catboost: bool = True
 
+            # Trening / walidacja
+            default_random_state: int = 42
+            default_cv_folds: int = 3
+            default_test_size: float = 0.2
+
+            # Telemetria / diagnostyka
+            track_telemetry: bool = False
+            show_debug_panel: bool = True
+
+            # Ścieżki
+            output_dir: str = "tmiv_out"
+            history_db_path: str = "tmiv_out/history.sqlite"
+
+            # LLM
+            llm_enabled_by_default: bool = False
+
+            # Rejestr modeli
+            models_dir: str = "tmiv_out/models"
+
+            # Pydantic v1 config
+            class Config:
+                env_file = ".env"
+                env_prefix = "TMIV_"
+                case_sensitive = False
 else:
     # brak pydantic – używamy dataclass
     Settings = _DataclassSettings  # type: ignore[misc]
@@ -234,7 +280,7 @@ def get_settings() -> Settings:
         s.app_env = os.getenv("TMIV_APP_ENV", s.app_env)
         s.debug = os.getenv("TMIV_DEBUG", str(s.debug)).lower() == "true"
 
-        s.data_max_file_size_mb = int(os.getenv("TMIV_DATA_MAX_FILE_SIZE_MB", s.data_max_file_size_mb))
+        s.data_max_file_size_mb = int(os.getenv("TMIV_DATA_MAX_FILE_SIZE_MB", str(s.data_max_file_size_mb)))
         fmts = os.getenv("TMIV_DATA_SUPPORTED_FORMATS", None)
         if fmts:
             s.data_supported_formats = [p.strip() for p in fmts.split(",") if p.strip()]
@@ -244,9 +290,9 @@ def get_settings() -> Settings:
         s.enable_lightgbm = os.getenv("TMIV_ENABLE_LIGHTGBM", str(s.enable_lightgbm)).lower() == "true"
         s.enable_catboost = os.getenv("TMIV_ENABLE_CATBOOST", str(s.enable_catboost)).lower() == "true"
 
-        s.default_random_state = int(os.getenv("TMIV_DEFAULT_RANDOM_STATE", s.default_random_state))
-        s.default_cv_folds = int(os.getenv("TMIV_DEFAULT_CV_FOLDS", s.default_cv_folds))
-        s.default_test_size = float(os.getenv("TMIV_DEFAULT_TEST_SIZE", s.default_test_size))
+        s.default_random_state = int(os.getenv("TMIV_DEFAULT_RANDOM_STATE", str(s.default_random_state)))
+        s.default_cv_folds = int(os.getenv("TMIV_DEFAULT_CV_FOLDS", str(s.default_cv_folds)))
+        s.default_test_size = float(os.getenv("TMIV_DEFAULT_TEST_SIZE", str(s.default_test_size)))
 
         s.track_telemetry = os.getenv("TMIV_TRACK_TELEMETRY", str(s.track_telemetry)).lower() == "true"
         s.show_debug_panel = os.getenv("TMIV_SHOW_DEBUG_PANEL", str(s.show_debug_panel)).lower() == "true"
