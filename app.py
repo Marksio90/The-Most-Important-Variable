@@ -8,6 +8,7 @@ import streamlit as st
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 import pandas as pd
+import plotly.express as px
 import numpy as np
 from dataclasses import dataclass, field
 import json
@@ -395,7 +396,7 @@ class TMIVApplication:
                 # Preprocessing
                 st.write("📋 Przygotowanie danych...")
                 preprocessor = SmartDataPreprocessor()
-                df_processed, prep_report = preprocessor.fit_transform(df, target)
+                df_processed, prep_report = preprocessor.preprocess(df, target)
                 
                 # Konfiguracja modelu
                 st.write("⚙️ Konfiguracja modelu...")
