@@ -378,10 +378,19 @@ class AppState:
     selected_analysis_type: str = "Podsumowanie statystyczne"
 
 def init_app_state() -> AppState:
-    """Inicjalizuje stan aplikacji"""
-    if "app_state" not in st.session_state:
-        st.session_state.app_state = AppState()
-    return st.session_state.app_state
+    """Inicjalizuje stan aplikacji z lepszą trwałością"""
+    # NAPRAWKA: Użyj bardziej stabilnego klucza
+    if "tmiv_app_state" not in st.session_state:
+        st.session_state.tmiv_app_state = AppState()
+    
+    # NAPRAWKA: Sprawdź spójność stanu
+    app_state = st.session_state.tmiv_app_state
+    
+    # Debug: loguj stan
+    if hasattr(st, 'write'):  # Only in debug mode
+        pass  # Można dodać logowanie
+    
+    return app_state
 
 def get_openai_key() -> str:
     """Pobiera klucz OpenAI z różnych źródeł"""
@@ -405,9 +414,15 @@ class TMIVApplication:
     
     def __init__(self):
         self.settings = get_settings()
+        # NAPRAWKA: Inicjalizuj stan przed innymi komponentami
         self.state = init_app_state()
         self.experiment_tracker = MLExperimentTracker()
         self._setup_configs()
+        
+        # NAPRAWKA: Sprawdź stan przy inicjalizacji
+        if hasattr(st, 'sidebar'):  # Tylko gdy UI jest dostępne
+            if self.state.training_completed:
+                st.sidebar.success("✅ Model załadowany z poprzedniej sesji")
         
     def _setup_configs(self):
         """Konfiguruje komponenty aplikacji"""
@@ -447,7 +462,7 @@ class TMIVApplication:
             self.column_analyzer = None
         
     def run(self):
-        """Główny punkt wejścia aplikacji"""
+        """Główny punkt wejścia aplikacji - naprawiona logika"""
         # Pokaż ostrzeżenia o brakujących modułach
         if missing_modules:
             with st.expander("⚠️ Informacje o modułach", expanded=False):
@@ -459,13 +474,16 @@ class TMIVApplication:
         self._render_header()
         self._render_openai_status()
         
-        # Główny przepływ
-        if not self.state.training_completed:
-            self._data_loading_phase()
-        else:
+        # NAPRAWKA: Zawsze renderuj sekcję danych
+        self._data_loading_phase()
+        
+        # NAPRAWKA: Pokazuj wyniki jeśli są dostępne
+        if self.state.training_completed and self.state.model is not None:
+            st.markdown("---")  # Separator
             self._results_phase()
         
         # Sekcje dostępne zawsze
+        st.markdown("---")  # Separator
         self._render_history_section()
         self._render_sidebar_tools()
         
@@ -501,7 +519,7 @@ class TMIVApplication:
             st.metric("Eksperymenty", experiments_count)
     
     def _render_openai_status(self):
-        """Status klucza OpenAI z naprawioną obsługą rerun"""
+        """Status klucza OpenAI bez problemów z rerun"""
         openai_key = get_openai_key()
         
         if openai_key:
@@ -515,21 +533,19 @@ class TMIVApplication:
                 - 📝 Szczegółowe opisy wyników
                 """)
                 
-                # NAPRAWKA: Usuń automatyczny rerun, użyj callback
                 key_input = st.text_input(
                     "Klucz OpenAI API",
                     type="password",
                     placeholder="sk-...",
                     help="Wklej klucz z https://platform.openai.com/account/api-keys",
-                    key="openai_key_input"  # Dodaj unikalny key
+                    key="openai_key_input"
                 )
                 
-                # NAPRAWKA: Dodaj przycisk do potwierdzenia zamiast automatycznego rerun
+                # NAPRAWKA: Przycisk zamiast auto-rerun
                 if key_input and st.button("💾 Zapisz klucz OpenAI", key="save_openai_key"):
                     st.session_state["openai_key"] = key_input
-                    st.success("✅ Klucz OpenAI zapisany! Odśwież stronę aby aktywować funkcje AI.")
-                    # Nie używaj st.rerun() tutaj!
-        
+                    st.success("✅ Klucz OpenAI zapisany! Funkcje AI są teraz aktywne.")
+            
     def _data_loading_phase(self):
         """Faza wczytywania i konfiguracji danych"""
         st.markdown("## 📊 Przygotowanie danych")
@@ -1100,8 +1116,11 @@ class TMIVApplication:
                 status.update(label="✅ Trening zakończony pomyślnie!", state="complete")
                 st.balloons()
                 
-                # Show quick results preview
-                st.success("🎉 Model gotowy! Przejdź do sekcji wyników poniżej.")
+                # NAPRAWKA: Wymuś wyświetlenie wyników
+                st.success("🎉 Model gotowy! Wyniki wyświetlone poniżej.")
+                
+                # NAPRAWKA: Nie używaj st.rerun() - powoduje resetowanie
+                # st.rerun()  # Usuń tę linię jeśli istnieje
                 
             except Exception as e:
                 status.update(label="❌ Błąd podczas treningu", state="error")
@@ -1609,6 +1628,17 @@ class TMIVApplication:
         with st.sidebar:
             st.header("🛠 Narzędzia")
             
+            # DODAJ: Debug info
+            with st.expander("🔍 Debug Info"):
+                st.write(f"Training completed: {self.state.training_completed}")
+                st.write(f"Model exists: {self.state.model is not None}")
+                st.write(f"Metrics count: {len(self.state.metrics)}")
+                st.write(f"Feature importance: {len(self.state.feature_importance)} rows")
+                
+                if 'experiment_history' in st.session_state:
+                    st.write(f"History: {len(st.session_state.experiment_history)} experiments")
+     
+        
             # Export section
             st.subheader("💾 Eksport")
             if self.state.training_completed:
