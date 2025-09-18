@@ -212,12 +212,30 @@ def _load_env_chain() -> None:
         load_dotenv(override=False)
 
 
+def _has_streamlit_secrets() -> bool:
+    """
+    Bezpiecznie sprawdza czy Streamlit secrets są dostępne.
+    Zwraca False jeśli nie ma Streamlit, nie ma secrets.toml, albo wystąpił błąd.
+    """
+    if not HAS_STREAMLIT:
+        return False
+    
+    try:
+        # Próbujemy uzyskać dostęp do secrets - jeśli nie ma pliku, streamlit rzuci wyjątek
+        _ = st.secrets
+        return True
+    except Exception:
+        # StreamlitSecretNotFoundError albo inny błąd - secrets nie są dostępne
+        return False
+
+
 def _override_from_secrets(s: Settings) -> Settings:
     """
     Drobne nadpisania z st.secrets (jeśli Streamlit udostępnia), np. profile/limity.
     Nie nadpisuje agresywnie – tylko jeśli są dostępne i typu bool/int/str/list.
+    BEZPIECZNIE obsługuje przypadek gdy secrets.toml nie istnieje.
     """
-    if not HAS_STREAMLIT:
+    if not _has_streamlit_secrets():
         return s
 
     try:
@@ -227,22 +245,23 @@ def _override_from_secrets(s: Settings) -> Settings:
 
     def _maybe_set(attr: str, key: str):
         nonlocal s
-        if key in sec:
-            try:
+        try:
+            if key in sec:
                 val = sec[key]
                 # lekkie rzutowania na typy prymitywne
-                if isinstance(getattr(s, attr), bool):
+                if isinstance(getattr(s, attr, None), bool):
                     setattr(s, attr, bool(val))
-                elif isinstance(getattr(s, attr), int):
+                elif isinstance(getattr(s, attr, None), int):
                     setattr(s, attr, int(val))
-                elif isinstance(getattr(s, attr), float):
+                elif isinstance(getattr(s, attr, None), float):
                     setattr(s, attr, float(val))
-                elif isinstance(getattr(s, attr), list) and isinstance(val, (list, tuple)):
+                elif isinstance(getattr(s, attr, None), list) and isinstance(val, (list, tuple)):
                     setattr(s, attr, list(val))
-                elif isinstance(getattr(s, attr), str):
+                elif isinstance(getattr(s, attr, None), str):
                     setattr(s, attr, str(val))
-            except Exception:
-                pass
+        except Exception:
+            # Ignoruj błędy - nie chcemy crashować aplikacji z powodu secrets
+            pass
 
     # przykładowe mapowania
     _maybe_set("app_env", "APP_ENV")
@@ -303,7 +322,7 @@ def get_settings() -> Settings:
 
         s.llm_enabled_by_default = os.getenv("TMIV_LLM_ENABLED_BY_DEFAULT", str(s.llm_enabled_by_default)).lower() == "true"
 
-    # Nadpisz z secrets (o ile Streamlit)
+    # Nadpisz z secrets (o ile Streamlit) - BEZPIECZNIE
     s = _override_from_secrets(s)
 
     # Tryb PROD → domyślnie mniej hałasu
