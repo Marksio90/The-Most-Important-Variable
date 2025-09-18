@@ -39,19 +39,11 @@ XGB = _soft_import("xgboost")
 LGBM = _soft_import("lightgbm")
 CATB = _soft_import("catboost")
 
-# Utils (nasze)
-try:
-    # preferowana ścieżka (po scaleniu utilsów)
-    from backend.utils import (
-        seed_everything, infer_problem_type,
-        hash_dataframe_signature
-    )
-except Exception:
-    # fallback na starszy import
-    from utils import (
-        seed_everything, infer_problem_type,
-        hash_dataframe_signature
-    )
+# Utils (nasze) - naprawiony import
+from backend.utils import (
+    seed_everything, infer_problem_type,
+    hash_dataframe_signature
+)
 
 # ---------------------------
 # Konfiguracja / kontrakty
