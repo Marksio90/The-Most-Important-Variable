@@ -11,3 +11,4 @@ tmiv_out/
 *.db
 .env
 .venv/
+secrets.toml
