@@ -961,9 +961,20 @@ def _export_results(self):
 def main():
     try:
         app = TMIVApplication()
-        app.run()
+        
+        # Renderuj nagłówek
+        app._render_header()
+        app._render_openai_status()
+        
+        # Główny przepływ
+        if not app.state.training_completed:
+            app._data_loading_phase()
+        else:
+            app._results_phase()
+        
+        # Sekcje dostępne zawsze
+        app._render_history_section()
+        app._render_sidebar_tools()
+        
     except Exception as e:
         st.error(f"Błąd aplikacji: {e}")
-
-if __name__ == "__main__":
-    main()
