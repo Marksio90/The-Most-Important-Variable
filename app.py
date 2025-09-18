@@ -32,13 +32,13 @@ except ImportError:
     px = None
 
 try:
-    from settings import get_settings  # Bez "config."
+    from config.settings import get_settings  # Z "config."
     # Test czy działa
     test_settings = get_settings()
     if not hasattr(test_settings, 'data_max_file_size_mb'):
         raise ImportError("Settings object missing data configuration")
 except ImportError:
-    missing_modules.append("settings")
+    missing_modules.append("config.settings")
     def get_settings():
         class MockData:
             max_file_size_mb = 200
