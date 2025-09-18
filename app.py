@@ -185,14 +185,31 @@ except ImportError:
     class RunRecord:
         def __init__(self, **kwargs): pass
     class MLExperimentTracker:
-        def __init__(self): self.history = []
+        def __init__(self): 
+            self.history = []
+        
         def get_history(self): 
             return pd.DataFrame(self.history) if self.history else pd.DataFrame()
-        def log_run(self, record): return True
-        def get_statistics(self): return {"total_runs": len(self.history)}
-        def export_to_csv(self): return "experiment_id,dataset,target\n"
-        def clear_history(self, confirm=False): self.history = []
-        def backup_database(self): return Path("backup.db")
+        
+        def log_run(self, record): 
+            self.history.append({
+                "run_id": getattr(record, 'run_id', 'test'),
+                "dataset": getattr(record, 'dataset', 'unknown'),
+                "target": getattr(record, 'target', 'unknown')
+            })
+            return True
+        
+        def get_statistics(self): 
+            return {"total_runs": len(self.history)}
+        
+        def export_to_csv(self): 
+            return "run_id,dataset,target\n"
+        
+        def clear_history(self, confirm=False): 
+            self.history = []
+        
+        def backup_database(self): 
+            return Path("backup.db")
 
 # Logger
 logger = logging.getLogger(__name__)
