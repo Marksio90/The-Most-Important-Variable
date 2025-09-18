@@ -501,7 +501,7 @@ class TMIVApplication:
             st.metric("Eksperymenty", experiments_count)
     
     def _render_openai_status(self):
-        """Status klucza OpenAI z ulepszonym UI"""
+        """Status klucza OpenAI z naprawioną obsługą rerun"""
         openai_key = get_openai_key()
         
         if openai_key:
@@ -515,16 +515,21 @@ class TMIVApplication:
                 - 📝 Szczegółowe opisy wyników
                 """)
                 
+                # NAPRAWKA: Usuń automatyczny rerun, użyj callback
                 key_input = st.text_input(
                     "Klucz OpenAI API",
                     type="password",
                     placeholder="sk-...",
-                    help="Wklej klucz z https://platform.openai.com/account/api-keys"
+                    help="Wklej klucz z https://platform.openai.com/account/api-keys",
+                    key="openai_key_input"  # Dodaj unikalny key
                 )
-                if key_input:
+                
+                # NAPRAWKA: Dodaj przycisk do potwierdzenia zamiast automatycznego rerun
+                if key_input and st.button("💾 Zapisz klucz OpenAI", key="save_openai_key"):
                     st.session_state["openai_key"] = key_input
-                    st.rerun()
-    
+                    st.success("✅ Klucz OpenAI zapisany! Odśwież stronę aby aktywować funkcje AI.")
+                    # Nie używaj st.rerun() tutaj!
+        
     def _data_loading_phase(self):
         """Faza wczytywania i konfiguracji danych"""
         st.markdown("## 📊 Przygotowanie danych")
