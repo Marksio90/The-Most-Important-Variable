@@ -32,13 +32,13 @@ except ImportError:
     px = None
 
 try:
-    from config.settings import get_settings
+    from settings import get_settings  # Bez "config."
     # Test czy działa
     test_settings = get_settings()
-    if not hasattr(test_settings, 'data'):
-        raise ImportError("Settings object missing data attribute")
+    if not hasattr(test_settings, 'data_max_file_size_mb'):
+        raise ImportError("Settings object missing data configuration")
 except ImportError:
-    missing_modules.append("config.settings")
+    missing_modules.append("settings")
     def get_settings():
         class MockData:
             max_file_size_mb = 200
@@ -275,6 +275,160 @@ def get_openai_key() -> str:
 class TMIVApplication:
     """Główna klasa aplikacji TMIV"""
     
+    # Dodaj te metody do klasy TMIVApplication w app.py:
+
+def _render_predictions(self):
+    """Renderuje sekcję predykcji."""
+    if not self.state.model:
+        return
+    
+    st.subheader("🔮 Predykcje")
+    
+    with st.expander("📊 Testowe predykcje", expanded=False):
+        if self.state.dataset is not None:
+            # Weź próbkę danych
+            sample_data = self.state.dataset.head(10).drop(columns=[self.state.target_column], errors='ignore')
+            
+            try:
+                predictions = self.state.model.predict(sample_data)
+                
+                # Wyświetl wyniki
+                results_df = sample_data.copy()
+                results_df['Predykcja'] = predictions
+                st.dataframe(results_df, use_container_width=True)
+                
+            except Exception as e:
+                st.error(f"Błąd predykcji: {e}")
+
+def _render_history_section(self):
+    """Renderuje sekcję historii eksperymentów."""
+    st.markdown("## 📚 Historia eksperymentów")
+    
+    try:
+        history = self.experiment_tracker.get_history()
+        
+        if history.empty:
+            st.info("🆕 Brak historii eksperymentów. Przeprowadź pierwszy eksperyment!")
+            return
+        
+        # Podstawowe statystyki
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_runs = len(history)
+            st.metric("Łączne eksperymenty", total_runs)
+        
+        with col2:
+            completed = len(history[history['status'] == 'completed']) if 'status' in history.columns else 0
+            st.metric("Ukończone", completed)
+        
+        with col3:
+            unique_datasets = history['dataset'].nunique() if 'dataset' in history.columns else 0
+            st.metric("Unikalne datasety", unique_datasets)
+        
+        with col4:
+            unique_targets = history['target'].nunique() if 'target' in history.columns else 0
+            st.metric("Unikalne targety", unique_targets)
+        
+        # Tabela historii
+        with st.expander("📋 Szczegóły eksperymentów", expanded=True):
+            # Wybierz kolumny do wyświetlenia
+            display_columns = ['run_id', 'dataset', 'target', 'created_at']
+            available_columns = [col for col in display_columns if col in history.columns]
+            
+            if available_columns:
+                st.dataframe(
+                    history[available_columns].head(20), 
+                    use_container_width=True
+                )
+            else:
+                st.dataframe(history.head(20), use_container_width=True)
+        
+    except Exception as e:
+        st.error(f"Błąd podczas ładowania historii: {e}")
+        logger.exception("Failed to render history section")
+
+def _render_sidebar_tools(self):
+    """Renderuje narzędzia w sidebarze."""
+    with st.sidebar:
+        st.header("🛠 Narzędzia")
+        
+        # Eksport wyników
+        if self.state.training_completed:
+            if st.button("📥 Eksportuj wyniki", use_container_width=True):
+                self._export_results()
+        
+        # Historia eksperymentów
+        st.subheader("📚 Historia")
+        
+        # Statystyki
+        try:
+            stats = self.experiment_tracker.get_statistics()
+            total_runs = stats.get('total_runs', 0)
+            st.metric("Eksperymenty", total_runs)
+        except Exception:
+            st.metric("Eksperymenty", "❌")
+        
+        # Zarządzanie historią
+        with st.expander("⚙️ Zarządzanie"):
+            if st.button("🗑 Wyczyść historię", type="secondary"):
+                if st.checkbox("Potwierdź usunięcie"):
+                    self.experiment_tracker.clear_history(confirm=True)
+                    st.success("Historia wyczyszczona!")
+                    st.rerun()
+            
+            if st.button("💾 Backup bazy", type="secondary"):
+                backup_path = self.experiment_tracker.backup_database()
+                if backup_path:
+                    st.success(f"Backup: {backup_path}")
+
+def _reset_state(self):
+    """Resetuje stan aplikacji."""
+    # Wyczyść stan treningu
+    self.state.model = None
+    self.state.metrics = {}
+    self.state.feature_importance = pd.DataFrame()
+    self.state.metadata = {}
+    self.state.training_completed = False
+    
+    st.success("🔄 Stan aplikacji został zresetowany")
+    st.rerun()
+
+def _export_results(self):
+    """Eksportuje wyniki eksperymentu."""
+    if not self.state.training_completed:
+        st.warning("Brak wyników do eksportu")
+        return
+    
+    try:
+        # Przygotuj dane do eksportu
+        export_data = {
+            "dataset_name": self.state.dataset_name,
+            "target_column": self.state.target_column,
+            "metrics": self.state.metrics,
+            "feature_importance": self.state.feature_importance.to_dict('records') if not self.state.feature_importance.empty else [],
+            "metadata": self.state.metadata,
+            "timestamp": pd.Timestamp.now().isoformat()
+        }
+        
+        # Konwertuj do JSON
+        import json
+        json_data = json.dumps(export_data, indent=2, ensure_ascii=False, default=str)
+        
+        # Utwórz przycisk download
+        st.download_button(
+            label="📁 Pobierz wyniki (JSON)",
+            data=json_data,
+            file_name=f"tmiv_results_{self.state.dataset_name}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
+        )
+        
+        st.success("✅ Wyniki gotowe do pobrania!")
+        
+    except Exception as e:
+        st.error(f"Błąd eksportu: {e}")
+        logger.exception("Failed to export results")
+
     def __init__(self):
         self.settings = get_settings()
         self.state = init_app_state()
