@@ -4,8 +4,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
-from typing import List, Optional, Any, Dict
+from typing import List, Optional, Any, Dict, Union
+from pathlib import Path
+import json
 import os
+import re
 
 # optional: Streamlit secrets (gdy aplikacja działa w Streamlit)
 try:
@@ -17,12 +20,12 @@ except Exception:
 # optional: pydantic v1/v2 (jeśli brak, użyjemy fallbacku z dataclass)
 try:
     try:
-        from pydantic_settings import BaseSettings  # v2 style
+        from pydantic_settings import BaseSettings  # v2
         from pydantic import Field
         PydanticBase = BaseSettings  # type: ignore
         PYD_VER = 2
     except Exception:
-        from pydantic import BaseSettings, Field  # type: ignore
+        from pydantic import BaseSettings, Field  # v1  # type: ignore
         PydanticBase = BaseSettings  # type: ignore
         PYD_VER = 1
     HAS_PYDANTIC = True
@@ -30,7 +33,7 @@ except Exception:
     HAS_PYDANTIC = False
     PydanticBase = object  # type: ignore
     PYD_VER = 0
-    def Field(*args, **kwargs): return None
+    def Field(*args, **kwargs): return None  # type: ignore
 
 # optional: dotenv (lokalne .env podczas dev)
 try:
@@ -38,6 +41,43 @@ try:
     HAS_DOTENV = True
 except Exception:
     HAS_DOTENV = False
+
+
+# ==========================
+#  Pomocnicze konwersje ENV
+# ==========================
+TRUE_SET  = {"1", "true", "t", "yes", "y", "on"}
+FALSE_SET = {"0", "false", "f", "no", "n", "off"}
+
+def _env_bool(val: Union[str, bool, int, None], default: bool) -> bool:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val != 0
+    if val is None:
+        return default
+    s = str(val).strip().lower()
+    if s in TRUE_SET: return True
+    if s in FALSE_SET: return False
+    return default
+
+def _env_list(val: Union[str, List[str], None], default: List[str]) -> List[str]:
+    if val is None:
+        return list(default)
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    s = str(val).strip()
+    if not s:
+        return list(default)
+    # spróbuj JSON
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+    except Exception:
+        pass
+    # fallback: CSV (bez spacji)
+    return [p.strip() for p in s.split(",") if p.strip()]
 
 
 # ==========================
@@ -64,11 +104,7 @@ class _DataclassSettings:
 
     # Dane / Upload
     data_max_file_size_mb: int = 200
-    data_supported_formats: List[str] = None
-
-    def __post_init__(self):
-        if self.data_supported_formats is None:
-            self.data_supported_formats = [".csv", ".xlsx", ".xls"]
+    data_supported_formats: List[str] = None  # np. [".csv", ".xlsx"]
 
     # ML / funkcje opcjonalne
     enable_shap: bool = False
@@ -88,12 +124,18 @@ class _DataclassSettings:
     # Ścieżki
     output_dir: str = "tmiv_out"
     history_db_path: str = "tmiv_out/history.sqlite"
+    models_dir: str = "tmiv_out/models"
 
     # LLM / klucze (tylko flaga; realny klucz pobieramy w utils.get_openai_key_from_envs)
     llm_enabled_by_default: bool = False
 
-    # Rejestr modeli
-    models_dir: str = "tmiv_out/models"
+    # Wyliczenia pomocnicze (uzupełniane po inicjalizacji)
+    is_prod: bool = False
+    is_dev: bool = True
+
+    def __post_init__(self):
+        if self.data_supported_formats is None:
+            self.data_supported_formats = [".csv", ".xlsx", ".xls"]
 
 
 # ==========================
@@ -101,7 +143,6 @@ class _DataclassSettings:
 # ==========================
 if HAS_PYDANTIC:
     if PYD_VER == 2:
-        # Pydantic v2 - tylko model_config
         class Settings(PydanticBase):  # type: ignore[misc]
             # Ogólne
             app_name: str = "TMIV"
@@ -130,22 +171,23 @@ if HAS_PYDANTIC:
             # Ścieżki
             output_dir: str = "tmiv_out"
             history_db_path: str = "tmiv_out/history.sqlite"
+            models_dir: str = "tmiv_out/models"
 
             # LLM
             llm_enabled_by_default: bool = False
 
-            # Rejestr modeli
-            models_dir: str = "tmiv_out/models"
+            # pomocnicze (ustawiane po utworzeniu)
+            is_prod: bool = False
+            is_dev: bool = True
 
             # Pydantic v2 config
             model_config = {
                 "env_file": ".env",
                 "env_prefix": "TMIV_",
                 "case_sensitive": False,
-                "extra": "ignore"
+                "extra": "ignore",
             }
     else:
-        # Pydantic v1 - tylko class Config
         class Settings(PydanticBase):  # type: ignore[misc]
             # Ogólne
             app_name: str = "TMIV"
@@ -174,20 +216,20 @@ if HAS_PYDANTIC:
             # Ścieżki
             output_dir: str = "tmiv_out"
             history_db_path: str = "tmiv_out/history.sqlite"
+            models_dir: str = "tmiv_out/models"
 
             # LLM
             llm_enabled_by_default: bool = False
 
-            # Rejestr modeli
-            models_dir: str = "tmiv_out/models"
+            # pomocnicze (ustawiane po utworzeniu)
+            is_prod: bool = False
+            is_dev: bool = True
 
-            # Pydantic v1 config
             class Config:
                 env_file = ".env"
                 env_prefix = "TMIV_"
                 case_sensitive = False
 else:
-    # brak pydantic – używamy dataclass
     Settings = _DataclassSettings  # type: ignore[misc]
 
 
@@ -197,18 +239,11 @@ else:
 def _load_env_chain() -> None:
     """
     Porządek:
-      1) st.secrets (o ile Streamlit) — na potrzeby 'logic', ale te wartości i tak sczyta Pydantic/ENV
-      2) .env przez dotenv (DEV)
-      3) os.environ (PROD)
-    Pydantic (jeśli jest) i tak wczyta env automatycznie; ta funkcja jest po to,
-    żeby w dev try rozprowadzić zmienne z .env do os.environ (gdy dotenv dostępny).
+      1) .env przez dotenv (DEV)
+      2) os.environ (PROD)
+    Pydantic (jeśli jest) i tak wczyta ENV automatycznie; ta funkcja w DEV dogrywa .env do os.environ.
     """
-    # 1) Streamlit secrets nie trafiają automatycznie do os.environ – traktujemy informacyjnie
-    # (klucze LLM pobieramy bezpośrednio przez utils.get_openai_key_from_envs)
-
-    # 2) .env → os.environ (tylko jeśli mamy python-dotenv)
     if HAS_DOTENV:
-        # domyślne .env w katalogu projektu
         load_dotenv(override=False)
 
 
@@ -219,21 +254,17 @@ def _has_streamlit_secrets() -> bool:
     """
     if not HAS_STREAMLIT:
         return False
-    
     try:
-        # Próbujemy uzyskać dostęp do secrets - jeśli nie ma pliku, streamlit rzuci wyjątek
-        _ = st.secrets
+        _ = st.secrets  # type: ignore[attr-defined]
         return True
     except Exception:
-        # StreamlitSecretNotFoundError albo inny błąd - secrets nie są dostępne
         return False
 
 
 def _override_from_secrets(s: Settings) -> Settings:
     """
-    Drobne nadpisania z st.secrets (jeśli Streamlit udostępnia), np. profile/limity.
+    Drobne nadpisania z st.secrets (jeśli dostępne), np. profile/limity.
     Nie nadpisuje agresywnie – tylko jeśli są dostępne i typu bool/int/str/list.
-    BEZPIECZNIE obsługuje przypadek gdy secrets.toml nie istnieje.
     """
     if not _has_streamlit_secrets():
         return s
@@ -244,26 +275,24 @@ def _override_from_secrets(s: Settings) -> Settings:
         return s
 
     def _maybe_set(attr: str, key: str):
-        nonlocal s
         try:
             if key in sec:
                 val = sec[key]
-                # lekkie rzutowania na typy prymitywne
-                if isinstance(getattr(s, attr, None), bool):
-                    setattr(s, attr, bool(val))
-                elif isinstance(getattr(s, attr, None), int):
+                cur = getattr(s, attr, None)
+                if isinstance(cur, bool):
+                    setattr(s, attr, _env_bool(val, cur))
+                elif isinstance(cur, int):
                     setattr(s, attr, int(val))
-                elif isinstance(getattr(s, attr, None), float):
+                elif isinstance(cur, float):
                     setattr(s, attr, float(val))
-                elif isinstance(getattr(s, attr, None), list) and isinstance(val, (list, tuple)):
-                    setattr(s, attr, list(val))
-                elif isinstance(getattr(s, attr, None), str):
+                elif isinstance(cur, list):
+                    setattr(s, attr, _env_list(val, cur))
+                elif isinstance(cur, str):
                     setattr(s, attr, str(val))
         except Exception:
-            # Ignoruj błędy - nie chcemy crashować aplikacji z powodu secrets
             pass
 
-    # przykładowe mapowania
+    # przykładowe mapowania (opcjonalne)
     _maybe_set("app_env", "APP_ENV")
     _maybe_set("data_max_file_size_mb", "DATA_MAX_FILE_SIZE_MB")
     _maybe_set("track_telemetry", "TRACK_TELEMETRY")
@@ -272,6 +301,40 @@ def _override_from_secrets(s: Settings) -> Settings:
     _maybe_set("enable_xgboost", "ENABLE_XGBOOST")
     _maybe_set("enable_lightgbm", "ENABLE_LIGHTGBM")
     _maybe_set("enable_catboost", "ENABLE_CATBOOST")
+    _maybe_set("output_dir", "OUTPUT_DIR")
+    _maybe_set("models_dir", "MODELS_DIR")
+    _maybe_set("history_db_path", "HISTORY_DB_PATH")
+
+    return s
+
+
+def _normalize_after_load(s: Settings) -> Settings:
+    """Ujednolica typy/formaty po wczytaniu z ENV/secrets – niezależnie od backendu (pydantic/dataclass)."""
+    # app_env + flagi trybu
+    env_up = (getattr(s, "app_env", "DEV") or "DEV").upper()
+    try:
+        s.is_prod = env_up == "PROD"  # type: ignore[attr-defined]
+        s.is_dev = not s.is_prod      # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    # listy i booleany z .env (np. "1"/"0", ".csv,.xlsx")
+    s.data_supported_formats = _env_list(getattr(s, "data_supported_formats", None),
+                                         [".csv", ".xlsx", ".xls"])
+
+    # upewnij się, że wartości liczbowe są poprawne
+    try:
+        s.data_max_file_size_mb = int(s.data_max_file_size_mb)
+    except Exception:
+        s.data_max_file_size_mb = 200
+
+    # upewnij się, że ścieżki istnieją (tworzymy dopiero przy starcie aplikacji UI/CLI)
+    for p in (getattr(s, "output_dir", "tmiv_out"),
+              getattr(s, "models_dir", "tmiv_out/models")):
+        try:
+            Path(p).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     return s
 
@@ -285,7 +348,8 @@ def get_settings() -> Settings:
     Singleton konfiguracyjny.
     - ładuje .env (jeśli dotenv),
     - tworzy Settings (Pydantic albo dataclass),
-    - delikatnie nadpisuje z st.secrets (gdy Streamlit).
+    - delikatnie nadpisuje z st.secrets (gdy Streamlit),
+    - normalizuje typy i listy niezależnie od backendu.
     """
     _load_env_chain()
 
@@ -293,40 +357,43 @@ def get_settings() -> Settings:
         # Pydantic sam przeczyta ENV + .env (jeśli obecne)
         s = Settings()  # type: ignore[call-arg]
     else:
-        # Fallback: dataclass + ręczne mapowanie minimalnych ENV
+        # Fallback: dataclass + ręczne mapowanie ENV
         s = Settings()  # type: ignore[call-arg]
         s.app_name = os.getenv("TMIV_APP_NAME", s.app_name)
         s.app_env = os.getenv("TMIV_APP_ENV", s.app_env)
-        s.debug = os.getenv("TMIV_DEBUG", str(s.debug)).lower() == "true"
+        s.debug = _env_bool(os.getenv("TMIV_DEBUG"), s.debug)
 
-        s.data_max_file_size_mb = int(os.getenv("TMIV_DATA_MAX_FILE_SIZE_MB", str(s.data_max_file_size_mb)))
-        fmts = os.getenv("TMIV_DATA_SUPPORTED_FORMATS", None)
-        if fmts:
-            s.data_supported_formats = [p.strip() for p in fmts.split(",") if p.strip()]
+        s.data_max_file_size_mb = int(os.getenv("TMIV_DATA_MAX_FILE_SIZE_MB", s.data_max_file_size_mb))
+        s.data_supported_formats = _env_list(os.getenv("TMIV_DATA_SUPPORTED_FORMATS"),
+                                             s.data_supported_formats)
 
-        s.enable_shap = os.getenv("TMIV_ENABLE_SHAP", str(s.enable_shap)).lower() == "true"
-        s.enable_xgboost = os.getenv("TMIV_ENABLE_XGBOOST", str(s.enable_xgboost)).lower() == "true"
-        s.enable_lightgbm = os.getenv("TMIV_ENABLE_LIGHTGBM", str(s.enable_lightgbm)).lower() == "true"
-        s.enable_catboost = os.getenv("TMIV_ENABLE_CATBOOST", str(s.enable_catboost)).lower() == "true"
+        s.enable_shap = _env_bool(os.getenv("TMIV_ENABLE_SHAP"), s.enable_shap)
+        s.enable_xgboost = _env_bool(os.getenv("TMIV_ENABLE_XGBOOST"), s.enable_xgboost)
+        s.enable_lightgbm = _env_bool(os.getenv("TMIV_ENABLE_LIGHTGBM"), s.enable_lightgbm)
+        s.enable_catboost = _env_bool(os.getenv("TMIV_ENABLE_CATBOOST"), s.enable_catboost)
 
-        s.default_random_state = int(os.getenv("TMIV_DEFAULT_RANDOM_STATE", str(s.default_random_state)))
-        s.default_cv_folds = int(os.getenv("TMIV_DEFAULT_CV_FOLDS", str(s.default_cv_folds)))
-        s.default_test_size = float(os.getenv("TMIV_DEFAULT_TEST_SIZE", str(s.default_test_size)))
+        s.default_random_state = int(os.getenv("TMIV_DEFAULT_RANDOM_STATE", s.default_random_state))
+        s.default_cv_folds = int(os.getenv("TMIV_DEFAULT_CV_FOLDS", s.default_cv_folds))
+        s.default_test_size = float(os.getenv("TMIV_DEFAULT_TEST_SIZE", s.default_test_size))
 
-        s.track_telemetry = os.getenv("TMIV_TRACK_TELEMETRY", str(s.track_telemetry)).lower() == "true"
-        s.show_debug_panel = os.getenv("TMIV_SHOW_DEBUG_PANEL", str(s.show_debug_panel)).lower() == "true"
+        s.track_telemetry = _env_bool(os.getenv("TMIV_TRACK_TELEMETRY"), s.track_telemetry)
+        s.show_debug_panel = _env_bool(os.getenv("TMIV_SHOW_DEBUG_PANEL"), s.show_debug_panel)
 
         s.output_dir = os.getenv("TMIV_OUTPUT_DIR", s.output_dir)
         s.history_db_path = os.getenv("TMIV_HISTORY_DB_PATH", s.history_db_path)
         s.models_dir = os.getenv("TMIV_MODELS_DIR", s.models_dir)
 
-        s.llm_enabled_by_default = os.getenv("TMIV_LLM_ENABLED_BY_DEFAULT", str(s.llm_enabled_by_default)).lower() == "true"
+        s.llm_enabled_by_default = _env_bool(os.getenv("TMIV_LLM_ENABLED_BY_DEFAULT"),
+                                             s.llm_enabled_by_default)
 
     # Nadpisz z secrets (o ile Streamlit) - BEZPIECZNIE
     s = _override_from_secrets(s)
 
+    # Normalize / sanity
+    s = _normalize_after_load(s)
+
     # Tryb PROD → domyślnie mniej hałasu
-    if (getattr(s, "app_env", "DEV") or "DEV").upper() == "PROD":
+    if getattr(s, "is_prod", False):
         try:
             s.debug = False
             s.show_debug_panel = False
@@ -336,4 +403,41 @@ def get_settings() -> Settings:
     return s
 
 
-__all__ = ["get_settings", "Settings", "MLEngine"]
+# ==========================
+#  Convenience helpers
+# ==========================
+def engines_enabled(settings: Optional[Settings] = None) -> Dict[str, bool]:
+    s = settings or get_settings()
+    return {
+        "sklearn": True,  # zawsze
+        "lightgbm": bool(getattr(s, "enable_lightgbm", True)),
+        "xgboost": bool(getattr(s, "enable_xgboost", True)),
+        "catboost": bool(getattr(s, "enable_catboost", True)),
+        "pycaret": False,  # domyślnie wyłączony; włącz, jeśli używasz
+    }
+
+def as_dict(settings: Optional[Settings] = None) -> Dict[str, Any]:
+    s = settings or get_settings()
+    # Minimalny słownik do debug panelu
+    return {
+        "app_name": s.app_name,
+        "app_env": s.app_env,
+        "debug": s.debug,
+        "data_max_file_size_mb": s.data_max_file_size_mb,
+        "data_supported_formats": s.data_supported_formats,
+        "default_random_state": s.default_random_state,
+        "default_cv_folds": s.default_cv_folds,
+        "default_test_size": s.default_test_size,
+        "output_dir": s.output_dir,
+        "models_dir": s.models_dir,
+        "history_db_path": s.history_db_path,
+        "enable_xgboost": s.enable_xgboost,
+        "enable_lightgbm": s.enable_lightgbm,
+        "enable_catboost": s.enable_catboost,
+        "enable_shap": s.enable_shap,
+        "is_prod": getattr(s, "is_prod", False),
+        "is_dev": getattr(s, "is_dev", True),
+    }
+
+
+__all__ = ["get_settings", "Settings", "MLEngine", "engines_enabled", "as_dict"]
