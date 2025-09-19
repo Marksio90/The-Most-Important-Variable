@@ -8,7 +8,6 @@ from typing import List, Optional, Any, Dict, Union
 from pathlib import Path
 import json
 import os
-import re
 
 # optional: Streamlit secrets (gdy aplikacja działa w Streamlit)
 try:
@@ -49,7 +48,7 @@ except Exception:
 TRUE_SET  = {"1", "true", "t", "yes", "y", "on"}
 FALSE_SET = {"0", "false", "f", "no", "n", "off"}
 
-def _env_bool(val: Union[str, bool, int, None], default: bool) -> bool:
+def _env_bool(val: Union[str, bool, int, None], default: bool = False) -> bool:
     if isinstance(val, bool):
         return val
     if isinstance(val, int):
@@ -76,7 +75,7 @@ def _env_list(val: Union[str, List[str], None], default: List[str]) -> List[str]
             return [str(x).strip() for x in parsed if str(x).strip()]
     except Exception:
         pass
-    # fallback: CSV (bez spacji)
+    # fallback: CSV
     return [p.strip() for p in s.split(",") if p.strip()]
 
 
@@ -248,10 +247,7 @@ def _load_env_chain() -> None:
 
 
 def _has_streamlit_secrets() -> bool:
-    """
-    Bezpiecznie sprawdza czy Streamlit secrets są dostępne.
-    Zwraca False jeśli nie ma Streamlit, nie ma secrets.toml, albo wystąpił błąd.
-    """
+    """Bezpiecznie sprawdza czy Streamlit secrets są dostępne."""
     if not HAS_STREAMLIT:
         return False
     try:
@@ -263,7 +259,7 @@ def _has_streamlit_secrets() -> bool:
 
 def _override_from_secrets(s: Settings) -> Settings:
     """
-    Drobne nadpisania z st.secrets (jeśli dostępne), np. profile/limity.
+    Delikatne nadpisania z st.secrets (jeśli dostępne), np. profile/limity.
     Nie nadpisuje agresywnie – tylko jeśli są dostępne i typu bool/int/str/list.
     """
     if not _has_streamlit_secrets():
