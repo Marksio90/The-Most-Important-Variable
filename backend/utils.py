@@ -536,10 +536,39 @@ def compare_dataframes(df1: pd.DataFrame, df2: pd.DataFrame) -> Dict[str, Any]:
 def get_openai_key_from_envs() -> Optional[str]:
     """
     Pobiera klucz OpenAI z zmiennych środowiskowych.
-    Kompatybilność z starym kodem.
+    Kompatybilność z starym kodem + ładowanie .env
     """
     import os
-    return os.getenv('OPENAI_API_KEY') or os.getenv('OPENAI_KEY')
+    
+    # Spróbuj załadować .env
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()  # Ładuje .env do os.environ
+    except ImportError:
+        # python-dotenv nie jest zainstalowane - to OK
+        pass
+    
+    # Sprawdź różne możliwe nazwy kluczy
+    possible_keys = [
+        'OPENAI_API_KEY',
+        'OPENAI_KEY', 
+        'OPENAI_SECRET_KEY'
+    ]
+    
+    for key_name in possible_keys:
+        key_value = os.getenv(key_name)
+        if key_value and key_value.startswith('sk-'):
+            return key_value
+    
+    # Sprawdź session state Streamlit
+    try:
+        import streamlit as st
+        if hasattr(st, 'session_state') and 'temp_openai_key' in st.session_state:
+            return st.session_state.temp_openai_key
+    except:
+        pass
+    
+    return None
 
 
 def auto_pick_target(df: pd.DataFrame) -> Optional[str]:
