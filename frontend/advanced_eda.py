@@ -26,9 +26,32 @@ TOP_CORR_SHOW = 30             # ile top korelacji pokazać w tabeli
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def _describe_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Szybkie statystyki opisowe – cache'owane."""
-    # datetime jako numeryczne (dla spójności describe)
-    return df.copy().describe(include="all", datetime_is_numeric=True)
+    """
+    Bezpieczny opis DataFrame:
+    - Na nowych Pandas próbuje datetime_is_numeric=True.
+    - Na starszych: konwertuje kolumny datetime do int64 (ns) i wywołuje describe(include="all").
+    """
+    try:
+        # nowe Pandas (mają datetime_is_numeric)
+        return df.copy().describe(include="all", datetime_is_numeric=True)
+    except TypeError:
+        # starsze Pandas – rzutuj kolumny datetime do int64 (ns) i opisuj
+        df2 = df.copy()
+        # łapiemy różne warianty dtype datetime
+        dt_cols = df2.select_dtypes(include=[
+            "datetime64[ns]", "datetime64[ns, tz]", "datetimetz"
+        ]).columns
+        for c in dt_cols:
+            # bezpieczna konwersja do UTC i int ns; wartości NaT -> NaN
+            s = pd.to_datetime(df2[c], errors="coerce", utc=True)
+            # view wymaga dtype datetime64[ns]; po utc=True jest timezone-aware,
+            # dlatego rzutujemy na naive ns przez .astype('datetime64[ns]')
+            try:
+                df2[c] = s.astype("datetime64[ns]").view("int64")
+            except Exception:
+                # fallback: różne edge-case'y -> pozostaw jako NaN
+                df2[c] = pd.to_numeric(s.view("int64"), errors="coerce")
+        return df2.describe(include="all")
 
 @st.cache_data(show_spinner=False)
 def _value_counts_head(s: pd.Series, top: int = TOP_CATEG_LEVELS) -> pd.DataFrame:
