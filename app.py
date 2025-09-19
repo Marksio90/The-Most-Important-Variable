@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import traceback
 import time
+import io
+import mimetypes
 import os  # <-- potrzebne dla env
 
 # === ENV & OpenAI key helpers (override) ===
@@ -122,14 +124,78 @@ def render_eda_section(df: pd.DataFrame) -> None:
                 st.write(f"**{c}** — unikatowe: {min(len(uniq), 20)} / {len(uniq)}")
                 st.write(uniq[:20])
 
+def render_download_buttons(export_files: dict) -> None:
+    """
+    Oczekuje słownika: nazwa -> ścieżka (str/Path) lub bytes / file-like.
+    Dla ścieżek odczytuje plik i tworzy st.download_button.
+    """
+    if not export_files:
+        st.info("Brak plików do pobrania.")
+        return
+
+    st.subheader("📥 Pobierz artefakty")
+    for label, obj in export_files.items():
+        file_name = None
+        data_bytes = None
+        mime = "application/octet-stream"
+
+        # 1) Ścieżka (str/Path)
+        if isinstance(obj, (str, Path)):
+            p = Path(obj)
+            if p.exists() and p.is_file():
+                file_name = p.name
+                mime_guess, _ = mimetypes.guess_type(str(p))
+                if mime_guess:
+                    mime = mime_guess
+                with open(p, "rb") as f:
+                    data_bytes = f.read()
+            else:
+                st.warning(f"Plik nie istnieje: {obj}")
+                continue
+
+        # 2) Bytes
+        elif isinstance(obj, (bytes, bytearray)):
+            data_bytes = bytes(obj)
+            file_name = f"{label}.bin"
+
+        # 3) Plik w pamięci (np. io.BytesIO)
+        elif hasattr(obj, "read"):
+            try:
+                pos = obj.tell() if hasattr(obj, "tell") else None
+                data_bytes = obj.read()
+                if pos is not None and hasattr(obj, "seek"):
+                    obj.seek(pos)
+            except Exception:
+                st.warning(f"Nie udało się odczytać obiektu pliku dla: {label}")
+                continue
+            file_name = f"{label}.bin"
+
+        # 4) DataFrame -> CSV
+        elif isinstance(obj, pd.DataFrame):
+            buf = io.StringIO()
+            obj.to_csv(buf, index=False)
+            data_bytes = buf.getvalue().encode("utf-8")
+            file_name = f"{label}.csv"
+            mime = "text/csv"
+
+        else:
+            st.warning(f"Nieobsługiwany typ dla '{label}': {type(obj)}")
+            continue
+
+        st.download_button(
+            label=f"⬇️ Pobierz: {label}",
+            data=data_bytes,
+            file_name=file_name or f"{label}",
+            mime=mime,
+            use_container_width=True,
+        )
 
 # ====== NASZE MODUŁY (z paczek 1-8) ======
 from config.settings import get_settings
 from frontend.ui_components import (
     render_sidebar, render_footer, render_upload_section,
     render_model_config_section, render_training_results,
-    render_data_preview_enhanced,
-    render_download_buttons
+    render_data_preview_enhanced
 )
 
 # Nadpisujemy importowany render_sidebar lokalną wersją:
