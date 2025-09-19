@@ -33,7 +33,7 @@ joblib>=1.3.0
 openai>=1.3.0
 tiktoken>=0.5.0
 
-# UTILITIES
+# UTILITIE
 python-dateutil>=2.8.0
 requests>=2.31.0
 Pillow>=10.0.0
