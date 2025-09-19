@@ -28,29 +28,29 @@ TOP_CORR_SHOW = 30             # ile top korelacji pokazać w tabeli
 def _describe_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Bezpieczny opis DataFrame:
-    - Na nowych Pandas próbuje datetime_is_numeric=True.
-    - Na starszych: konwertuje kolumny datetime do int64 (ns) i wywołuje describe(include="all").
+    - Na nowszych Pandas próbuje datetime_is_numeric=True.
+    - Na starszych: każdą kolumnę datetime konwertuje do liczby ns od epoki (float, NaT->NaN),
+      po czym wywołuje describe(include="all").
     """
     try:
-        # nowe Pandas (mają datetime_is_numeric)
+        # Działa na Pandas 1.5+ / 2.x
         return df.copy().describe(include="all", datetime_is_numeric=True)
     except TypeError:
-        # starsze Pandas – rzutuj kolumny datetime do int64 (ns) i opisuj
+        # Starsze Pandas: rzutuj kolumny datetime na int64 ns -> float (NaT=>NaN)
         df2 = df.copy()
-        # łapiemy różne warianty dtype datetime
-        dt_cols = df2.select_dtypes(include=[
-            "datetime64[ns]", "datetime64[ns, tz]", "datetimetz"
-        ]).columns
-        for c in dt_cols:
-            # bezpieczna konwersja do UTC i int ns; wartości NaT -> NaN
-            s = pd.to_datetime(df2[c], errors="coerce", utc=True)
-            # view wymaga dtype datetime64[ns]; po utc=True jest timezone-aware,
-            # dlatego rzutujemy na naive ns przez .astype('datetime64[ns]')
+        for c in df2.columns:
+            s = df2[c]
             try:
-                df2[c] = s.astype("datetime64[ns]").view("int64")
+                if is_datetime64_any_dtype(s):
+                    # Konwersja do UTC i ns
+                    s2 = pd.to_datetime(s, errors="coerce", utc=True)
+                    arr = s2.view("int64").astype("float64")
+                    # Zamień wartości iNaT na NaN, by nie psuły statystyk
+                    arr[arr == np.iinfo("int64").min] = np.nan
+                    df2[c] = arr
             except Exception:
-                # fallback: różne edge-case'y -> pozostaw jako NaN
-                df2[c] = pd.to_numeric(s.view("int64"), errors="coerce")
+                # W razie wątpliwości zostaw kolumnę bez zmian
+                pass
         return df2.describe(include="all")
 
 @st.cache_data(show_spinner=False)
