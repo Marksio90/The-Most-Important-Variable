@@ -438,153 +438,153 @@ def main():
         ])
 
         # TAB 1: Wczytywanie danych — STABILNE
-    with tab1:
-        st.header("📁 Wczytywanie danych")
+        with tab1:
+            st.header("📁 Wczytywanie danych")
 
-        # zapamiętujemy wybór źródła między rerunami
-        data_source = st.radio(
-            "Wybierz źródło danych:",
-            ["📁 Upload pliku", "🥑 Demo: Avocado", "🌸 Demo: Iris", "📊 Demo: Wine"],
-            horizontal=True,
-            key="tmiv_data_source",
-        )
-
-        # --- helper: cache odczytu pliku na podstawie bajtów ---
-        @st.cache_data(show_spinner="Wczytywanie danych…")
-        def _read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
-            import io
-            bio = io.BytesIO(file_bytes)
-            if filename.lower().endswith(".csv"):
-                return pd.read_csv(bio)
-            elif filename.lower().endswith((".xlsx", ".xls")):
-                return pd.read_excel(bio)
-            else:
-                raise ValueError("Nieobsługiwany format pliku.")
-
-        # --- helper: ustaw dataset w stanie TYLKO gdy się zmienił (po podpisie) ---
-        def _set_dataset_if_changed(new_df: pd.DataFrame, new_name: str):
-            sig_new = hash_dataframe_signature(new_df)
-            sig_old = hash_dataframe_signature(state.dataset) if state.dataset is not None else None
-            if sig_new != sig_old:
-                state.dataset = new_df
-                state.dataset_name = new_name
-                # reset tylko przy NOWYM zbiorze
-                state.target_column = None
-                state.target_recommendations = []
-                state.training_result = None
-                state.training_completed = False
-
-        new_df = None
-        new_name = ""
-
-        if data_source == "📁 Upload pliku":
-            uploaded = st.file_uploader(
-                "Wybierz plik danych",
-                type=['csv', 'xlsx', 'xls'],
-                help="Obsługiwane formaty: CSV, Excel",
-                key="tmiv_uploader",
+            # zapamiętujemy wybór źródła między rerunami
+            data_source = st.radio(
+                "Wybierz źródło danych:",
+                ["📁 Upload pliku", "🥑 Demo: Avocado", "🌸 Demo: Iris", "📊 Demo: Wine"],
+                horizontal=True,
+                key="tmiv_data_source",
             )
 
-            if uploaded is not None:
-                try:
-                    file_bytes = uploaded.getvalue()
-                    new_df = _read_table(file_bytes, uploaded.name)
-                    new_name = uploaded.name.rsplit(".", 1)[0]
-                except Exception as e:
-                    st.error(f"❌ Błąd wczytywania: {e}")
+            # --- helper: cache odczytu pliku na podstawie bajtów ---
+            @st.cache_data(show_spinner="Wczytywanie danych…")
+            def _read_table(file_bytes: bytes, filename: str) -> pd.DataFrame:
+                import io
+                bio = io.BytesIO(file_bytes)
+                if filename.lower().endswith(".csv"):
+                    return pd.read_csv(bio)
+                elif filename.lower().endswith((".xlsx", ".xls")):
+                    return pd.read_excel(bio)
+                else:
+                    raise ValueError("Nieobsługiwany format pliku.")
 
-        elif data_source == "🥑 Demo: Avocado":
-            if st.button("📥 Wczytaj Avocado Dataset", type="primary", key="btn_avocado"):
-                try:
-                    avocado_path = Path("data/avocado.csv")
-                    if avocado_path.exists():
-                        new_df = pd.read_csv(avocado_path)
-                        if 'Unnamed: 0' in new_df.columns:
-                            new_df = new_df.drop('Unnamed: 0', axis=1)
-                        new_name = "avocado"
-                        st.success("✅ Demo dataset Avocado wczytany!")
-                        st.info("🎯 **Idealny dla regresji** – `AveragePrice` jako target.")
-                    else:
-                        st.error("❌ Nie znaleziono data/avocado.csv")
-                        st.info("💡 Umieść plik avocado.csv w folderze data/")
-                except Exception as e:
-                    st.error(f"❌ Błąd: {e}")
+            # --- helper: ustaw dataset w stanie TYLKO gdy się zmienił (po podpisie) ---
+            def _set_dataset_if_changed(new_df: pd.DataFrame, new_name: str):
+                sig_new = hash_dataframe_signature(new_df)
+                sig_old = hash_dataframe_signature(state.dataset) if state.dataset is not None else None
+                if sig_new != sig_old:
+                    state.dataset = new_df
+                    state.dataset_name = new_name
+                    # reset tylko przy NOWYM zbiorze
+                    state.target_column = None
+                    state.target_recommendations = []
+                    state.training_result = None
+                    state.training_completed = False
 
-            if state.dataset is None:
-                with st.expander("ℹ️ O datasecie Avocado"):
-                    st.write("""
-                    **Avocado Prices Dataset**
-                    - 📊 18 249 wierszy × 13 kolumn
-                    - 🎯 Target: `AveragePrice`
-                    - 📈 Regresja
-                    """)
+            new_df = None
+            new_name = ""
 
-        elif data_source == "🌸 Demo: Iris":
-            if st.button("📥 Wczytaj Iris Dataset", type="primary", key="btn_iris"):
-                try:
-                    from sklearn.datasets import load_iris
-                    iris = load_iris(as_frame=True)
-                    new_df = iris.frame
-                    new_name = "iris"
-                    st.success("✅ Demo dataset Iris wczytany!")
-                    st.info("🎯 **Klasyfikacja** – gatunek kwiatu.")
-                except Exception as e:
-                    st.error(f"❌ Błąd: {e}")
+            if data_source == "📁 Upload pliku":
+                uploaded = st.file_uploader(
+                    "Wybierz plik danych",
+                    type=['csv', 'xlsx', 'xls'],
+                    help="Obsługiwane formaty: CSV, Excel",
+                    key="tmiv_uploader",
+                )
 
-            if state.dataset is None:
-                with st.expander("ℹ️ O datasecie Iris"):
-                    st.write("""
-                    **Iris Flower Classification**
-                    - 📊 150 wierszy × 5 kolumn
-                    - 🎯 Target: `target` (3 klasy)
-                    - 📈 Klasyfikacja
-                    """)
+                if uploaded is not None:
+                    try:
+                        file_bytes = uploaded.getvalue()
+                        new_df = _read_table(file_bytes, uploaded.name)
+                        new_name = uploaded.name.rsplit(".", 1)[0]
+                    except Exception as e:
+                        st.error(f"❌ Błąd wczytywania: {e}")
 
-        elif data_source == "📊 Demo: Wine":
-            if st.button("📥 Wczytaj Wine Dataset", type="primary", key="btn_wine"):
-                try:
-                    from sklearn.datasets import load_wine
-                    wine = load_wine(as_frame=True)
-                    new_df = wine.frame
-                    new_name = "wine"
-                    st.success("✅ Demo dataset Wine wczytany!")
-                    st.info("🎯 **Klasyfikacja** – gatunek wina.")
-                except Exception as e:
-                    st.error(f"❌ Błąd: {e}")
+            elif data_source == "🥑 Demo: Avocado":
+                if st.button("📥 Wczytaj Avocado Dataset", type="primary", key="btn_avocado"):
+                    try:
+                        avocado_path = Path("data/avocado.csv")
+                        if avocado_path.exists():
+                            new_df = pd.read_csv(avocado_path)
+                            if 'Unnamed: 0' in new_df.columns:
+                                new_df = new_df.drop('Unnamed: 0', axis=1)
+                            new_name = "avocado"
+                            st.success("✅ Demo dataset Avocado wczytany!")
+                            st.info("🎯 **Idealny dla regresji** – `AveragePrice` jako target.")
+                        else:
+                            st.error("❌ Nie znaleziono data/avocado.csv")
+                            st.info("💡 Umieść plik avocado.csv w folderze data/")
+                    except Exception as e:
+                        st.error(f"❌ Błąd: {e}")
 
-            if state.dataset is None:
-                with st.expander("ℹ️ O datasecie Wine"):
-                    st.write("""
-                    **Wine Classification**
-                    - 📊 178 wierszy × 14 kolumn
-                    - 🎯 Target: `target` (3 klasy)
-                    - 📈 Klasyfikacja
-                    """)
+                if state.dataset is None:
+                    with st.expander("ℹ️ O datasecie Avocado"):
+                        st.write("""
+                        **Avocado Prices Dataset**
+                        - 📊 18 249 wierszy × 13 kolumn
+                        - 🎯 Target: `AveragePrice`
+                        - 📈 Regresja
+                        """)
 
-        # Jeśli coś nowego wczytano — ustaw do stanu tylko gdy inny niż obecny
-        if new_df is not None:
-            _set_dataset_if_changed(new_df, new_name)
+            elif data_source == "🌸 Demo: Iris":
+                if st.button("📥 Wczytaj Iris Dataset", type="primary", key="btn_iris"):
+                    try:
+                        from sklearn.datasets import load_iris
+                        iris = load_iris(as_frame=True)
+                        new_df = iris.frame
+                        new_name = "iris"
+                        st.success("✅ Demo dataset Iris wczytany!")
+                        st.info("🎯 **Klasyfikacja** – gatunek kwiatu.")
+                    except Exception as e:
+                        st.error(f"❌ Błąd: {e}")
 
-        # --- PREVIEW: zawsze bazuj na state.dataset (nie na lokalnym df!) ---
-        if state.dataset is not None:
-            st.success(f"✅ Dane: {len(state.dataset)} wierszy × {len(state.dataset.columns)} kolumn")
-            render_data_preview(state.dataset)
+                if state.dataset is None:
+                    with st.expander("ℹ️ O datasecie Iris"):
+                        st.write("""
+                        **Iris Flower Classification**
+                        - 📊 150 wierszy × 5 kolumn
+                        - 🎯 Target: `target` (3 klasy)
+                        - 📈 Klasyfikacja
+                        """)
 
-            # Walidacja + ostrzeżenia (lekka, bez rerenderów)
-            validation = validate_dataframe(state.dataset)
-            if not validation['valid']:
-                st.error("❌ Problemy z danymi:")
-                for err in validation['errors']:
-                    st.error(f"• {err}")
-            for warn in validation['warnings']:
-                st.warning(f"⚠️ {warn}")
+            elif data_source == "📊 Demo: Wine":
+                if st.button("📥 Wczytaj Wine Dataset", type="primary", key="btn_wine"):
+                    try:
+                        from sklearn.datasets import load_wine
+                        wine = load_wine(as_frame=True)
+                        new_df = wine.frame
+                        new_name = "wine"
+                        st.success("✅ Demo dataset Wine wczytany!")
+                        st.info("🎯 **Klasyfikacja** – gatunek wina.")
+                    except Exception as e:
+                        st.error(f"❌ Błąd: {e}")
 
-            # narzędzia
-            col_l, col_r = st.columns(2)
-            with col_l:
-                if st.button("🗑️ Wyczyść dane", type="secondary", key="btn_reset_data"):
-                    reset_app_state()
-                    st.rerun()
+                if state.dataset is None:
+                    with st.expander("ℹ️ O datasecie Wine"):
+                        st.write("""
+                        **Wine Classification**
+                        - 📊 178 wierszy × 14 kolumn
+                        - 🎯 Target: `target` (3 klasy)
+                        - 📈 Klasyfikacja
+                        """)
+
+            # Jeśli coś nowego wczytano — ustaw do stanu tylko gdy inny niż obecny
+            if new_df is not None:
+                _set_dataset_if_changed(new_df, new_name)
+
+            # --- PREVIEW: zawsze bazuj na state.dataset (nie na lokalnym df!) ---
+            if state.dataset is not None:
+                st.success(f"✅ Dane: {len(state.dataset)} wierszy × {len(state.dataset.columns)} kolumn")
+                render_data_preview(state.dataset)
+
+                # Walidacja + ostrzeżenia (lekka, bez rerenderów)
+                validation = validate_dataframe(state.dataset)
+                if not validation['valid']:
+                    st.error("❌ Problemy z danymi:")
+                    for err in validation['errors']:
+                        st.error(f"• {err}")
+                for warn in validation['warnings']:
+                    st.warning(f"⚠️ {warn}")
+
+                # narzędzia
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    if st.button("🗑️ Wyczyść dane", type="secondary", key="btn_reset_data"):
+                        reset_app_state()
+                        st.rerun()
 
 
         # TAB 2: Wybór targetu
