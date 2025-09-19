@@ -423,48 +423,146 @@ def main():
         with tab1:
             st.header("📁 Wczytywanie danych")
             
-            uploaded_file = st.file_uploader(
-                "Wybierz plik danych",
-                type=['csv', 'xlsx', 'xls'],
-                help="Obsługiwane formaty: CSV, Excel"
+            # Opcje wczytywania
+            data_source = st.radio(
+                "Wybierz źródło danych:",
+                ["📁 Upload pliku", "🥑 Demo: Avocado", "🌸 Demo: Iris", "📊 Demo: Wine"],
+                horizontal=True
             )
             
-            if uploaded_file is not None:
-                try:
-                    with st.spinner("Wczytywanie danych..."):
-                        # Wczytaj dane
-                        if uploaded_file.name.endswith('.csv'):
-                            df = pd.read_csv(uploaded_file)
-                        else:
-                            df = pd.read_excel(uploaded_file)
-                        
-                        state.dataset = df
-                        state.dataset_name = uploaded_file.name.split('.')[0]
-                        
-                        # Reset innych stanów
-                        state.target_column = None
-                        state.target_recommendations = []
-                        state.training_result = None
-                        state.training_completed = False
-                    
-                    st.success(f"✅ Wczytano {len(df)} wierszy i {len(df.columns)} kolumn")
-                    
-                    # Podgląd danych
-                    render_data_preview(df)
-                    
-                    # Walidacja
-                    validation = validate_dataframe(df)
-                    if not validation['valid']:
-                        st.error("❌ Problemy z danymi:")
-                        for error in validation['errors']:
-                            st.error(f"• {error}")
-                    
-                    if validation['warnings']:
-                        for warning in validation['warnings']:
-                            st.warning(f"⚠️ {warning}")
+            df = None
+            dataset_name = ""
+            
+            if data_source == "📁 Upload pliku":
+                uploaded_file = st.file_uploader(
+                    "Wybierz plik danych",
+                    type=['csv', 'xlsx', 'xls'],
+                    help="Obsługiwane formaty: CSV, Excel"
+                )
                 
-                except Exception as e:
-                    st.error(f"❌ Błąd wczytywania: {str(e)}")
+                if uploaded_file is not None:
+                    try:
+                        with st.spinner("Wczytywanie danych..."):
+                            # Wczytaj dane
+                            if uploaded_file.name.endswith('.csv'):
+                                df = pd.read_csv(uploaded_file)
+                            else:
+                                df = pd.read_excel(uploaded_file)
+                            
+                            dataset_name = uploaded_file.name.split('.')[0]
+                    
+                    except Exception as e:
+                        st.error(f"❌ Błąd wczytywania: {str(e)}")
+            
+            elif data_source == "🥑 Demo: Avocado":
+                if st.button("📥 Wczytaj Avocado Dataset", type="primary"):
+                    try:
+                        with st.spinner("Wczytywanie avocado dataset..."):
+                            avocado_path = Path("data/avocado.csv")
+                            if avocado_path.exists():
+                                df = pd.read_csv(avocado_path)
+                                # Czyść dane
+                                if 'Unnamed: 0' in df.columns:
+                                    df = df.drop('Unnamed: 0', axis=1)
+                                dataset_name = "avocado"
+                                st.success("✅ Demo dataset Avocado wczytany!")
+                                st.info("🎯 **Idealny dla regresji** - przewidywanie cen avocado na podstawie wolumenu, regionu, typu")
+                            else:
+                                st.error("❌ Nie znaleziono data/avocado.csv")
+                                st.info("💡 Umieść plik avocado.csv w folderze data/")
+                    except Exception as e:
+                        st.error(f"❌ Błąd: {str(e)}")
+                
+                # Info o datasecie
+                if not df is not None:
+                    with st.expander("ℹ️ O datasecie Avocado"):
+                        st.write("""
+                        **Avocado Prices Dataset**
+                        - 📊 18,249 wierszy × 13 kolumn
+                        - 🎯 Target: `AveragePrice` (średnia cena avocado w USD)
+                        - 📅 Okres: 2015-2018
+                        - 🗺️ Dane z różnych regionów USA
+                        - 🥑 Typy: conventional vs organic
+                        - 📈 **Typ problemu**: Regresja
+                        - 🏆 **Oczekiwane metryki**: R² ~0.70-0.85
+                        """)
+            
+            elif data_source == "🌸 Demo: Iris":
+                if st.button("📥 Wczytaj Iris Dataset", type="primary"):
+                    try:
+                        with st.spinner("Generowanie Iris dataset..."):
+                            from sklearn.datasets import load_iris
+                            iris = load_iris(as_frame=True)
+                            df = iris.frame
+                            dataset_name = "iris"
+                            st.success("✅ Demo dataset Iris wczytany!")
+                            st.info("🎯 **Idealny dla klasyfikacji** - rozpoznawanie gatunków kwiatów na podstawie wymiarów")
+                    except Exception as e:
+                        st.error(f"❌ Błąd: {str(e)}")
+                
+                # Info o datasecie
+                if not df is not None:
+                    with st.expander("ℹ️ O datasecie Iris"):
+                        st.write("""
+                        **Iris Flower Classification**
+                        - 📊 150 wierszy × 5 kolumn
+                        - 🎯 Target: `target` (gatunek: setosa, versicolor, virginica)
+                        - 🌸 Cechy: długość/szerokość płatków i działek
+                        - 📈 **Typ problemu**: Klasyfikacja (3 klasy)
+                        - 🏆 **Oczekiwane metryki**: Accuracy ~0.95+
+                        """)
+            
+            elif data_source == "📊 Demo: Wine":
+                if st.button("📥 Wczytaj Wine Dataset", type="primary"):
+                    try:
+                        with st.spinner("Generowanie Wine dataset..."):
+                            from sklearn.datasets import load_wine
+                            wine = load_wine(as_frame=True)
+                            df = wine.frame
+                            dataset_name = "wine"
+                            st.success("✅ Demo dataset Wine wczytany!")
+                            st.info("🎯 **Idealny dla klasyfikacji** - rozpoznawanie gatunków wina na podstawie składu chemicznego")
+                    except Exception as e:
+                        st.error(f"❌ Błąd: {str(e)}")
+                
+                # Info o datasecie
+                if not df is not None:
+                    with st.expander("ℹ️ O datasecie Wine"):
+                        st.write("""
+                        **Wine Classification**
+                        - 📊 178 wierszy × 14 kolumn
+                        - 🎯 Target: `target` (klasa wina: 0, 1, 2)
+                        - 🍷 Cechy: alkohol, kwasowość, magnez, etc.
+                        - 📈 **Typ problemu**: Klasyfikacja (3 klasy)
+                        - 🏆 **Oczekiwane metryki**: Accuracy ~0.90+
+                        """)
+            
+            # Jeśli dane zostały wczytane
+            if df is not None:
+                state.dataset = df
+                state.dataset_name = dataset_name
+                
+                # Reset innych stanów
+                state.target_column = None
+                state.target_recommendations = []
+                state.training_result = None
+                state.training_completed = False
+                
+                st.success(f"✅ Wczytano {len(df)} wierszy i {len(df.columns)} kolumn")
+                
+                # Podgląd danych
+                render_data_preview(df)
+                
+                # Walidacja
+                validation = validate_dataframe(df)
+                if not validation['valid']:
+                    st.error("❌ Problemy z danymi:")
+                    for error in validation['errors']:
+                        st.error(f"• {error}")
+                
+                if validation['warnings']:
+                    for warning in validation['warnings']:
+                        st.warning(f"⚠️ {warning}")
         
         # TAB 2: Wybór targetu
         with tab2:
