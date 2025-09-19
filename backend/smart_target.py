@@ -1,414 +1,384 @@
-# backend/smart_target_llm.py — Prawdziwy inteligentny wybór targetu z LLM
+# backend/smart_target.py — Minimalna wersja bez circular imports
 from __future__ import annotations
 
-import os
-import json
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
 import pandas as pd
-import streamlit as st
+import numpy as np
+import re
 
-from backend.utils import get_openai_key_from_envs
+from backend.utils import infer_problem_type, is_id_like
+
 
 @dataclass
-class LLMTargetAnalysis:
-    """Analiza targetu przez LLM."""
-    recommended_target: str
+class TargetRecommendation:
+    """Struktura rekomendacji wyboru targetu."""
+    column: str
     confidence: float  # 0-1
-    reasoning: str
-    problem_type: str  # "regression" | "classification"
-    business_context: str
-    alternative_targets: List[str]
-    warnings: List[str]
-    data_insights: str
+    reason: str
+    evidence: Dict[str, Any]
+    problem_type: str
+    quality_score: float  # 0-1
+    warnings: List[str] = field(default_factory=list)
+    recommendations: List[str] = field(default_factory=list)
 
 
-class LLMTargetSelector:
-    """Inteligentny selektor targetu wykorzystujący LLM."""
+class SmartTargetSelector:
+    """
+    Zaawansowany selektor targetu z wyjaśnieniami i rekomendacjami.
+    Automatycznie analizuje dane i proponuje najlepszy target z uzasadnieniem.
+    """
     
-    def __init__(self, openai_api_key: Optional[str] = None):
-        self.api_key = openai_api_key or get_openai_key_from_envs()
-        self.fallback_selector = SmartTargetSelector()
+    def __init__(self):
+        self.price_patterns = [
+            "averageprice", "avgprice", "avg_price", "price", "cost", "value",
+            "amount", "sum", "total", "revenue", "sales", "income", "profit"
+        ]
+        self.target_patterns = [
+            "target", "label", "y", "outcome", "result", "prediction", "class"
+        ]
+        self.id_patterns = [
+            "id", "uuid", "guid", "index", "idx", "key", "code", "number"
+        ]
     
-    def is_available(self) -> bool:
-        """Sprawdza czy LLM jest dostępny."""
-        return bool(self.api_key)
-    
-    def analyze_dataset_with_llm(self, df: pd.DataFrame, dataset_name: str = "dataset") -> Optional[LLMTargetAnalysis]:
-        """Analizuje dataset przy pomocy LLM i rekomenduje target."""
-        if not self.is_available():
-            return None
+    def analyze_and_recommend(self, df: pd.DataFrame) -> List[TargetRecommendation]:
+        """
+        Analizuje DataFrame i zwraca listę rekomendacji targetu.
+        Sortowane według confidence (najlepsze pierwsze).
+        """
+        if df is None or df.empty:
+            return []
         
-        try:
-            import openai
-            
-            # Przygotuj opis danych dla LLM
-            data_summary = self._prepare_data_summary(df, dataset_name)
-            
-            # Wywołaj OpenAI API
-            client = openai.OpenAI(api_key=self.api_key)
-            
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",  # tańszy model
-                messages=[
-                    {
-                        "role": "system",
-                        "content": self._get_system_prompt()
-                    },
-                    {
-                        "role": "user", 
-                        "content": f"Przeanalizuj ten dataset i zarekomenduj najlepszy target:\n\n{data_summary}"
-                    }
-                ],
-                temperature=0.1,
-                max_tokens=1000
-            )
-            
-            # Parsuj odpowiedź
-            response_text = response.choices[0].message.content
-            return self._parse_llm_response(response_text, df)
-            
-        except Exception as e:
-            st.error(f"Błąd wywołania LLM: {str(e)}")
-            return None
-    
-    def get_hybrid_recommendations(self, df: pd.DataFrame, dataset_name: str = "dataset") -> Dict[str, Any]:
-        """Łączy rekomendacje LLM z heurystyką."""
-        results = {
-            "llm_available": self.is_available(),
-            "llm_analysis": None,
-            "heuristic_recommendations": [],
-            "final_recommendation": None,
-            "confidence_source": "heuristic"
-        }
+        recommendations = []
         
-        # Zawsze rób analizę heurystyczną jako fallback
-        heuristic_recs = self.fallback_selector.analyze_and_recommend(df)
-        results["heuristic_recommendations"] = heuristic_recs
-        
-        # Spróbuj analizy LLM
-        if self.is_available():
-            llm_analysis = self.analyze_dataset_with_llm(df, dataset_name)
-            results["llm_analysis"] = llm_analysis
-            
-            if llm_analysis:
-                # LLM ma priorytet
-                results["final_recommendation"] = llm_analysis.recommended_target
-                results["confidence_source"] = "llm"
-            else:
-                # Fallback na heurystykę
-                results["final_recommendation"] = heuristic_recs[0].column if heuristic_recs else None
-        else:
-            # Tylko heurystyka
-            results["final_recommendation"] = heuristic_recs[0].column if heuristic_recs else None
-        
-        return results
-    
-    def _prepare_data_summary(self, df: pd.DataFrame, dataset_name: str) -> str:
-        """Przygotowuje opis danych dla LLM."""
-        summary_parts = []
-        
-        # Podstawowe info
-        summary_parts.append(f"DATASET: {dataset_name}")
-        summary_parts.append(f"ROZMIAR: {len(df)} wierszy × {len(df.columns)} kolumn")
-        summary_parts.append("")
-        
-        # Kolumny z podstawowymi statystykami
-        summary_parts.append("KOLUMNY:")
+        # Analiza każdej kolumny
         for col in df.columns:
-            series = df[col]
-            col_info = f"- {col} ({series.dtype})"
-            
-            if pd.api.types.is_numeric_dtype(series):
-                col_info += f" | Zakres: {series.min():.2f}-{series.max():.2f}"
-                col_info += f" | Średnia: {series.mean():.2f}"
-            else:
-                col_info += f" | Unikalne: {series.nunique()}"
-                if series.nunique() <= 10:
-                    unique_vals = list(series.unique()[:10])
-                    col_info += f" | Wartości: {unique_vals}"
-            
-            # Braki
-            null_pct = series.isna().mean() * 100
-            if null_pct > 0:
-                col_info += f" | Braki: {null_pct:.1f}%"
-            
-            summary_parts.append(col_info)
-        
-        # Próbka danych
-        summary_parts.append("\nPRÓBKA DANYCH (pierwsze 3 wiersze):")
-        sample_data = df.head(3).to_string(index=False)
-        summary_parts.append(sample_data)
-        
-        return "\n".join(summary_parts)
-    
-    def _get_system_prompt(self) -> str:
-        """Zwraca system prompt dla LLM."""
-        return """Jesteś ekspertem machine learning, który analizuje datasety i rekomenduje najlepszy target (zmienną docelową) do przewidywania.
-
-ZADANIE:
-1. Przeanalizuj podany dataset
-2. Zarekomenduj najlepszą kolumnę jako target
-3. Określ typ problemu (regression/classification)
-4. Wyjaśnij swoje uzasadnienie
-5. Zaproponuj alternatywne opcje
-
-ODPOWIEDŹ W FORMACIE JSON:
-{
-    "recommended_target": "nazwa_kolumny",
-    "confidence": 0.95,
-    "reasoning": "Szczegółowe wyjaśnienie dlaczego ta kolumna to najlepszy target",
-    "problem_type": "regression",
-    "business_context": "Kontekst biznesowy - co będziemy przewidywać i dlaczego to wartościowe",
-    "alternative_targets": ["kolumna1", "kolumna2"],
-    "warnings": ["Ostrzeżenie jeśli jakieś są"],
-    "data_insights": "Dodatkowe spostrzeżenia o danych"
-}
-
-KRYTERIA WYBORU TARGET:
-- Wartość biznesowa (co ma sens przewidywać?)
-- Jakość danych (brak braków, odpowiednia dystrybucja)
-- Przewidywalność (czy inne cechy mogą to przewidzieć?)
-- Typ problemu (regression dla ciągłych, classification dla kategorycznych)
-
-UNIKAJ:
-- ID, index, timestamp jako target
-- Kolumn z bardzo wysoką liczbą unikalnych wartości (dla classification)
-- Kolumn z brakami >20%"""
-    
-    def _parse_llm_response(self, response_text: str, df: pd.DataFrame) -> Optional[LLMTargetAnalysis]:
-        """Parsuje odpowiedź LLM do struktury."""
-        try:
-            # Wyciągnij JSON z odpowiedzi
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
-            
-            if json_start == -1 or json_end <= json_start:
-                return None
-            
-            json_text = response_text[json_start:json_end]
-            parsed = json.loads(json_text)
-            
-            # Waliduj czy target istnieje
-            recommended_target = parsed.get("recommended_target", "")
-            if recommended_target not in df.columns:
-                return None
-            
-            return LLMTargetAnalysis(
-                recommended_target=recommended_target,
-                confidence=float(parsed.get("confidence", 0.5)),
-                reasoning=parsed.get("reasoning", ""),
-                problem_type=parsed.get("problem_type", "unknown"),
-                business_context=parsed.get("business_context", ""),
-                alternative_targets=parsed.get("alternative_targets", []),
-                warnings=parsed.get("warnings", []),
-                data_insights=parsed.get("data_insights", "")
-            )
-            
-        except Exception as e:
-            st.error(f"Błąd parsowania odpowiedzi LLM: {str(e)}")
-            return None
-
-
-def render_openai_config():
-    """Renderuje konfigurację klucza OpenAI."""
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🤖 Konfiguracja AI")
-    
-    # Sprawdź obecny klucz
-    current_key = get_openai_key_from_envs()
-    has_key = bool(current_key)
-    
-    # Status
-    if has_key:
-        st.sidebar.success("✅ Klucz OpenAI: aktywny")
-        masked_key = current_key[:8] + "..." + current_key[-4:] if len(current_key) > 12 else "***"
-        st.sidebar.caption(f"Klucz: {masked_key}")
-    else:
-        st.sidebar.error("❌ Brak klucza OpenAI")
-        st.sidebar.caption("Tylko analiza heurystyczna")
-    
-    # Opcje konfiguracji
-    with st.sidebar.expander("⚙️ Konfiguracja klucza", expanded=not has_key):
-        st.write("**Opcje ustawienia klucza OpenAI:**")
-        
-        # Opcja 1: Zmienna środowiskowa
-        st.write("**1. Zmienna środowiskowa:**")
-        st.code("""
-export OPENAI_API_KEY="sk-..."
-# lub w .env:
-OPENAI_API_KEY=sk-...
-        """)
-        
-        # Opcja 2: Session state (tymczasowe)
-        st.write("**2. Tymczasowy klucz (tylko ta sesja):**")
-        temp_key = st.text_input(
-            "Klucz OpenAI:",
-            type="password",
-            placeholder="sk-...",
-            help="Klucz jest używany tylko w tej sesji"
-        )
-        
-        if temp_key and temp_key.startswith("sk-"):
-            # Ustaw w session state
-            st.session_state.temp_openai_key = temp_key
-            os.environ["OPENAI_API_KEY"] = temp_key
-            st.success("✅ Klucz ustawiony tymczasowo")
-            st.rerun()
-        
-        # Opcja 3: Info o kluczu
-        st.write("**3. Jak zdobyć klucz:**")
-        st.markdown("""
-        1. Idź na [platform.openai.com](https://platform.openai.com)
-        2. Zarejestruj się / zaloguj
-        3. API Keys → Create new secret key
-        4. Skopiuj klucz (sk-...)
-        """)
-        
-        if st.button("🔄 Odśwież status"):
-            st.rerun()
-    
-    return has_key
-
-
-def render_smart_target_section_with_llm(df: pd.DataFrame, dataset_name: str = "dataset"):
-    """Renderuje sekcję wyboru targetu z LLM."""
-    st.header("🎯 Inteligentny wybór targetu")
-    
-    # Sprawdź dostępność LLM
-    llm_selector = LLMTargetSelector()
-    has_llm = llm_selector.is_available()
-    
-    # Info o trybie
-    if has_llm:
-        st.info("🤖 **Tryb AI**: Używam GPT-4 do analizy danych i rekomendacji targetu")
-    else:
-        st.warning("🔧 **Tryb heurystyczny**: Brak klucza OpenAI - używam analizy statystycznej")
-        st.caption("💡 Skonfiguruj klucz OpenAI w sidebar dla prawdziwej inteligencji AI")
-    
-    # Przycisk analizy
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        analyze_btn = st.button(
-            f"🔍 {'Analizuj z AI' if has_llm else 'Analizuj heurystycznie'}", 
-            type="primary"
-        )
-    
-    with col2:
-        manual_mode = st.checkbox("✋ Wybór ręczny", help="Pomiń automatyczną analizę")
-    
-    # Analiza lub wybór ręczny
-    if manual_mode:
-        st.subheader("✋ Ręczny wybór targetu")
-        st.info("Wybierz target ręcznie bez automatycznych rekomendacji")
-        
-        selected_target = st.selectbox(
-            "Wybierz kolumnę targetu:",
-            df.columns,
-            help="Kolumna którą model będzie przewidywał"
-        )
-        
-        if st.button("✅ Zatwierdź wybór"):
-            return selected_target
-            
-    elif analyze_btn or 'target_analysis_done' in st.session_state:
-        # Wykonaj analizę
-        if analyze_btn:
-            with st.spinner(f"{'🤖 Analizuję dane z AI...' if has_llm else '🔧 Analizuję dane...'}"):
-                recommendations = llm_selector.get_hybrid_recommendations(df, dataset_name)
-                st.session_state.target_analysis = recommendations
-                st.session_state.target_analysis_done = True
-        
-        # Pokaż wyniki
-        if 'target_analysis' in st.session_state:
-            analysis = st.session_state.target_analysis
-            
-            # LLM analiza (jeśli dostępna)
-            if analysis.get("llm_analysis"):
-                llm_result = analysis["llm_analysis"]
-                
-                st.success(f"🤖 **Rekomendacja AI**: `{llm_result.recommended_target}`")
-                
-                # Szczegóły analizy
-                col1, col2 = st.columns([3, 1])
-                
-                with col1:
-                    st.write("**Uzasadnienie AI:**")
-                    st.write(llm_result.reasoning)
-                    
-                    if llm_result.business_context:
-                        st.write("**Kontekst biznesowy:**")
-                        st.write(llm_result.business_context)
-                
-                with col2:
-                    st.metric("Confidence", f"{llm_result.confidence:.1%}")
-                    st.metric("Typ problemu", llm_result.problem_type)
-                
-                # Dodatkowe insights
-                if llm_result.data_insights:
-                    with st.expander("💡 Dodatkowe spostrzeżenia AI"):
-                        st.write(llm_result.data_insights)
-                
-                # Ostrzeżenia
-                if llm_result.warnings:
-                    st.subheader("⚠️ Ostrzeżenia AI")
-                    for warning in llm_result.warnings:
-                        st.warning(warning)
-                
-                # Alternatywy
-                if llm_result.alternative_targets:
-                    with st.expander("🔄 Alternatywne opcje od AI"):
-                        for alt in llm_result.alternative_targets:
-                            if alt in df.columns:
-                                st.write(f"• {alt}")
-                
-                recommended_target = llm_result.recommended_target
-            
-            else:
-                # Fallback na heurystykę
-                heuristic_recs = analysis.get("heuristic_recommendations", [])
-                if heuristic_recs:
-                    best_rec = heuristic_recs[0]
-                    st.success(f"🔧 **Rekomendacja heurystyczna**: `{best_rec.column}`")
-                    
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.write(f"**Powód**: {best_rec.reason}")
-                    with col2:
-                        st.metric("Confidence", f"{best_rec.confidence:.1%}")
-                    
-                    recommended_target = best_rec.column
-                else:
-                    st.error("Nie udało się znaleźć rekomendacji targetu")
-                    recommended_target = df.columns[0]
-            
-            # Finalna sekcja wyboru
-            st.subheader("📋 Finalizuj wybór targetu")
-            
-            # Domyślnie rekomendowany target
             try:
-                default_idx = list(df.columns).index(recommended_target)
-            except ValueError:
-                default_idx = 0
+                rec = self._analyze_column(df, col)
+                if rec and rec.confidence > 0.1:  # min threshold
+                    recommendations.append(rec)
+            except Exception:
+                continue
+        
+        # Sortuj według confidence
+        recommendations.sort(key=lambda x: x.confidence, reverse=True)
+        
+        # Dodaj pozycyjne bonusy
+        self._apply_positional_bonuses(recommendations, df.columns)
+        
+        # Ponowne sortowanie po bonusach
+        recommendations.sort(key=lambda x: x.confidence, reverse=True)
+        
+        return recommendations[:5]  # Top 5
+    
+    def get_best_target(self, df: pd.DataFrame) -> Optional[TargetRecommendation]:
+        """Zwraca najlepszą rekomendację targetu."""
+        recommendations = self.analyze_and_recommend(df)
+        return recommendations[0] if recommendations else None
+    
+    def _analyze_column(self, df: pd.DataFrame, col: str) -> Optional[TargetRecommendation]:
+        """Analizuje pojedynczą kolumnę jako potencjalny target."""
+        series = df[col]
+        
+        # Podstawowe sprawdzenia
+        if self._is_invalid_target(series, col):
+            return None
+        
+        confidence = 0.0
+        reasons = []
+        evidence = {}
+        warnings = []
+        recommendations = []
+        
+        # 1) NAZWA - analiza wzorców w nazwie
+        name_score, name_reason = self._analyze_column_name(col)
+        confidence += name_score
+        if name_reason:
+            reasons.append(name_reason)
+        
+        # 2) TYP DANYCH I ROZKŁAD
+        data_score, data_reason, data_evidence = self._analyze_data_distribution(series)
+        confidence += data_score
+        if data_reason:
+            reasons.append(data_reason)
+        evidence.update(data_evidence)
+        
+        # 3) POZYCJA W DATAFRAME
+        position_score, position_reason = self._analyze_position(col, df.columns)
+        confidence += position_score
+        if position_reason:
+            reasons.append(position_reason)
+        
+        # 4) KORELACJE Z INNYMI KOLUMNAMI
+        correlation_score, correlation_reason = self._analyze_correlations(df, col)
+        confidence += correlation_score
+        if correlation_reason:
+            reasons.append(correlation_reason)
+        
+        # 5) WYKRYJ TYP PROBLEMU
+        try:
+            problem_type = infer_problem_type(df, col)
+        except:
+            problem_type = "regression" if pd.api.types.is_numeric_dtype(series) else "classification"
+        
+        # 6) OCEŃ JAKOŚĆ JAKO TARGET
+        quality_score, quality_warnings, quality_recs = self._assess_target_quality(series, problem_type)
+        warnings.extend(quality_warnings)
+        recommendations.extend(quality_recs)
+        
+        # Normalizuj confidence do 0-1
+        confidence = min(1.0, confidence / 4.0)  # 4 komponenty
+        
+        # Główny powód (najważniejszy)
+        main_reason = reasons[0] if reasons else "Analiza statystyczna"
+        
+        return TargetRecommendation(
+            column=col,
+            confidence=confidence,
+            reason=main_reason,
+            evidence=evidence,
+            problem_type=problem_type,
+            quality_score=quality_score,
+            warnings=warnings,
+            recommendations=recommendations
+        )
+    
+    def _is_invalid_target(self, series: pd.Series, col: str) -> bool:
+        """Sprawdza czy kolumna nie nadaje się na target."""
+        # ID-like kolumny
+        try:
+            if is_id_like(series, col):
+                return True
+        except:
+            pass
+        
+        # Całe puste
+        if series.isna().all():
+            return True
+        
+        # Za mało różnych wartości
+        if series.nunique(dropna=True) <= 1:
+            return True
+        
+        return False
+    
+    def _analyze_column_name(self, col: str) -> tuple[float, str]:
+        """Analizuje nazwę kolumny pod kątem wzorców targetowych."""
+        col_norm = re.sub(r'[^a-z0-9]', '', col.lower())
+        
+        # Najwyższy priorytet: ceny
+        for pattern in self.price_patterns:
+            if pattern in col_norm:
+                return 1.0, f"Nazwa '{col}' sugeruje zmienną cenową/finansową"
+        
+        # Średni priorytet: klasyczne targety
+        for pattern in self.target_patterns:
+            if pattern in col_norm:
+                return 0.8, f"Nazwa '{col}' sugeruje zmienną docelową"
+        
+        # Sprawdź końcówki sugerujące wynik
+        if col_norm.endswith(('rate', 'ratio', 'score', 'level', 'grade')):
+            return 0.6, f"Nazwa '{col}' sugeruje zmienną wynikową"
+        
+        return 0.0, ""
+    
+    def _analyze_data_distribution(self, series: pd.Series) -> tuple[float, str, Dict[str, Any]]:
+        """Analizuje rozkład danych w kolumnie."""
+        evidence = {}
+        
+        nunique = series.nunique(dropna=True)
+        total_count = len(series)
+        non_null_count = series.count()
+        
+        evidence.update({
+            'nunique': nunique,
+            'total_count': total_count,
+            'non_null_count': non_null_count,
+            'null_ratio': 1 - (non_null_count / total_count) if total_count > 0 else 1
+        })
+        
+        # Numeryczne - może być regresja
+        if pd.api.types.is_numeric_dtype(series):
+            # Wysoką różnorodność = prawdopodobnie target regresyjny
+            diversity_ratio = nunique / non_null_count if non_null_count > 0 else 0
+            evidence['diversity_ratio'] = diversity_ratio
             
-            final_target = st.selectbox(
-                "Zatwierdź lub zmień target:",
-                df.columns,
-                index=default_idx,
-                help="Możesz wybrać inny target niż rekomendowany"
-            )
+            if diversity_ratio > 0.7:
+                return 0.8, f"Wysoka różnorodność wartości ({nunique}/{non_null_count}) sugeruje target regresyjny", evidence
+            elif diversity_ratio > 0.3:
+                return 0.6, f"Średnia różnorodność wartości może wskazywać na target", evidence
+        
+        # Kategoryczne - może być klasyfikacja
+        else:
+            if 2 <= nunique <= 20:  # dobra liczba klas
+                evidence['class_distribution'] = series.value_counts().to_dict()
+                return 0.7, f"Optymalna liczba klas ({nunique}) dla klasyfikacji", evidence
+            elif nunique == 2:
+                return 0.9, f"Binarna klasyfikacja (2 klasy) - idealny target", evidence
+        
+        return 0.1, "Podstawowa analiza rozkładu", evidence
+    
+    def _analyze_position(self, col: str, all_columns: List[str]) -> tuple[float, str]:
+        """Analizuje pozycję kolumny w DataFrame."""
+        if not all_columns:
+            return 0.0, ""
+        
+        try:
+            col_idx = all_columns.index(col)
+        except ValueError:
+            return 0.0, ""
+        
+        # Ostatnia kolumna = często target
+        if col_idx == len(all_columns) - 1:
+            return 0.3, "Ostatnia kolumna w danych (częsta konwencja dla targetu)"
+        
+        # Pierwsza kolumna = rzadko target (często ID)
+        if col_idx == 0:
+            return -0.2, ""
+        
+        return 0.0, ""
+    
+    def _analyze_correlations(self, df: pd.DataFrame, col: str) -> tuple[float, str]:
+        """Analizuje korelacje z innymi kolumnami."""
+        try:
+            numeric_df = df.select_dtypes(include=[np.number])
+            if col not in numeric_df.columns or len(numeric_df.columns) < 2:
+                return 0.0, ""
             
-            if st.button("✅ Zatwierdź target", type="primary"):
-                # Wyczyść cache analizy
-                if 'target_analysis' in st.session_state:
-                    del st.session_state.target_analysis
-                if 'target_analysis_done' in st.session_state:
-                    del st.session_state.target_analysis_done
+            corr_matrix = numeric_df.corr()
+            col_correlations = corr_matrix[col].drop(col).abs()
+            
+            if len(col_correlations) == 0:
+                return 0.0, ""
+            
+            max_corr = col_correlations.max()
+            mean_corr = col_correlations.mean()
+            
+            # Umiarkowane korelacje = dobry target (nie za wysokie, nie za niskie)
+            if 0.3 <= max_corr <= 0.8:
+                return 0.4, f"Umiarkowane korelacje z innymi cechami (max: {max_corr:.2f})"
+            elif mean_corr > 0.2:
+                return 0.2, f"Średnie korelacje z cechami (średnia: {mean_corr:.2f})"
+        
+        except Exception:
+            pass
+        
+        return 0.0, ""
+    
+    def _assess_target_quality(self, series: pd.Series, problem_type: str) -> tuple[float, List[str], List[str]]:
+        """Ocenia jakość kolumny jako target i daje rekomendacje."""
+        warnings = []
+        recommendations = []
+        quality = 1.0  # start z max
+        
+        # Sprawdź braki
+        null_ratio = series.isna().mean()
+        if null_ratio > 0.1:
+            quality -= 0.3
+            warnings.append(f"Wysoki % braków danych ({null_ratio:.1%})")
+            recommendations.append("Rozważ uzupełnienie braków przed treningiem")
+        
+        # Dla klasyfikacji
+        if problem_type == "classification":
+            value_counts = series.value_counts()
+            
+            # Sprawdź balans klas
+            if len(value_counts) > 1:
+                min_class = value_counts.min()
+                max_class = value_counts.max()
+                imbalance_ratio = max_class / min_class
                 
-                return final_target
+                if imbalance_ratio > 10:
+                    quality -= 0.2
+                    warnings.append(f"Silny niebalans klas (ratio {imbalance_ratio:.1f}:1)")
+                    recommendations.append("Rozważ techniki balansowania klas")
+                
+                # Sprawdź minimalne liczności
+                if min_class < 5:
+                    quality -= 0.4
+                    warnings.append(f"Niektóre klasy mają za mało przykładów (min: {min_class})")
+                    recommendations.append("Zbierz więcej danych lub połącz rzadkie klasy")
+        
+        # Dla regresji
+        elif problem_type == "regression":
+            if pd.api.types.is_numeric_dtype(series):
+                # Sprawdź rozkład
+                try:
+                    skewness = series.skew()
+                    if abs(skewness) > 2:
+                        quality -= 0.1
+                        recommendations.append(f"Silnie skośny rozkład (skewness: {skewness:.2f}) - rozważ transformację")
+                except Exception:
+                    pass
+        
+        quality = max(0.0, min(1.0, quality))
+        return quality, warnings, recommendations
     
-    else:
-        st.info("👆 Kliknij przycisk analizy aby otrzymać rekomendacje targetu")
+    def _apply_positional_bonuses(self, recommendations: List[TargetRecommendation], columns: List[str]) -> None:
+        """Aplikuje bonusy pozycyjne do rekomendacji."""
+        for rec in recommendations:
+            try:
+                col_idx = columns.index(rec.column)
+                # Bonus za ostatnią pozycję
+                if col_idx == len(columns) - 1:
+                    rec.confidence += 0.1
+                # Malus za pierwszą pozycję (często ID)
+                elif col_idx == 0:
+                    rec.confidence -= 0.1
+                
+                rec.confidence = max(0.0, min(1.0, rec.confidence))
+            except ValueError:
+                continue
+
+
+def format_target_explanation(recommendation: TargetRecommendation) -> str:
+    """Formatuje wyjaśnienie wyboru targetu dla UI."""
+    if not recommendation:
+        return "Brak rekomendacji targetu."
     
-    return None
+    explanation = f"""
+🎯 **Rekomendowany target: `{recommendation.column}`**
+
+**Powód wyboru:** {recommendation.reason}
+
+**Confidence:** {recommendation.confidence:.1%} | **Jakość:** {recommendation.quality_score:.1%} | **Typ problemu:** {recommendation.problem_type}
+
+**Szczegóły analizy:**
+"""
+    
+    # Dodaj evidence
+    if 'nunique' in recommendation.evidence:
+        explanation += f"• Unikalnych wartości: {recommendation.evidence['nunique']}\n"
+    
+    if 'diversity_ratio' in recommendation.evidence:
+        explanation += f"• Różnorodność: {recommendation.evidence['diversity_ratio']:.1%}\n"
+    
+    if 'class_distribution' in recommendation.evidence:
+        dist = recommendation.evidence['class_distribution']
+        explanation += f"• Rozkład klas: {dict(list(dist.items())[:3])}\n"
+    
+    # Ostrzeżenia
+    if recommendation.warnings:
+        explanation += f"\n⚠️ **Ostrzeżenia:**\n"
+        for warning in recommendation.warnings:
+            explanation += f"• {warning}\n"
+    
+    # Rekomendacje
+    if recommendation.recommendations:
+        explanation += f"\n💡 **Rekomendacje:**\n"
+        for rec in recommendation.recommendations:
+            explanation += f"• {rec}\n"
+    
+    return explanation
+
+
+def format_alternatives_list(recommendations: List[TargetRecommendation]) -> str:
+    """Formatuje listę alternatywnych targetów."""
+    if not recommendations or len(recommendations) <= 1:
+        return ""
+    
+    alternatives = "\n🔄 **Alternatywne opcje:**\n"
+    for i, rec in enumerate(recommendations[1:4], 2):  # Top 2-4
+        alternatives += f"{i}. `{rec.column}` ({rec.confidence:.1%}) - {rec.reason}\n"
+    
+    return alternatives
