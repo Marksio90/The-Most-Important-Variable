@@ -14,7 +14,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.figure_factory as ff
 
-# ====== NASZE MODUŁY (z paczek 1-6) ======
+# ====== NASZE MODUŁY (z paczek 1-9) ======
 from config.settings import get_settings
 from frontend.ui_components import (
     render_upload_section, render_data_preview, render_model_config_section,
@@ -22,6 +22,10 @@ from frontend.ui_components import (
 )
 from frontend.advanced_eda import render_eda_section
 from backend.smart_target import SmartTargetSelector, format_target_explanation
+from backend.smart_target_llm import (
+    LLMTargetSelector, render_openai_config, 
+    render_smart_target_section_with_llm
+)
 from backend.ml_integration import (
     ModelConfig, train_model_comprehensive, save_model_artifacts, 
     load_model_artifacts, TrainingResult
@@ -401,6 +405,9 @@ def main():
         with st.sidebar:
             render_sidebar()
             
+            # NOWE: Konfiguracja OpenAI
+            render_openai_config()
+            
             if state.dataset is not None:
                 st.divider()
                 st.metric("Wiersze", f"{len(state.dataset):,}")
@@ -569,59 +576,18 @@ def main():
             if state.dataset is None:
                 st.info("📁 Najpierw wczytaj dane w zakładce 'Dane'")
             else:
-                st.header("🎯 Inteligentny wybór targetu")
+                # NOWE: Użyj LLM-powered target selection
+                selected_target = render_smart_target_section_with_llm(
+                    state.dataset, 
+                    state.dataset_name
+                )
                 
-                # Analiza targetu przez AI
-                if not state.target_recommendations:
-                    with st.spinner("Analizuję potencjalne targety..."):
-                        try:
-                            recommendations = smart_target.analyze_and_recommend(state.dataset)
-                            state.target_recommendations = recommendations
-                        except Exception as e:
-                            st.error(f"Błąd analizy targetu: {str(e)}")
-                            state.target_recommendations = []
-                
-                # Pokaż rekomendacje
-                if state.target_recommendations:
-                    best_recommendation = state.target_recommendations[0]
-                    
-                    st.markdown("### 🎯 Najlepsza rekomendacja")
-                    explanation = format_target_explanation(best_recommendation)
-                    st.markdown(explanation)
-                    
-                    # Alternatywy
-                    if len(state.target_recommendations) > 1:
-                        with st.expander("🔄 Alternatywne opcje"):
-                            for i, rec in enumerate(state.target_recommendations[1:4], 2):
-                                st.write(f"**{i}. {rec.column}** ({rec.confidence:.1%}) - {rec.reason}")
-                
-                # Wybór targetu
-                col1, col2 = st.columns([3, 1])
-                
-                with col1:
-                    # Domyślny wybór - najlepsza rekomendacja
-                    default_idx = 0
-                    if state.target_recommendations:
-                        best_col = state.target_recommendations[0].column
-                        if best_col in state.dataset.columns:
-                            default_idx = list(state.dataset.columns).index(best_col)
-                    
-                    selected_target = st.selectbox(
-                        "Wybierz kolumnę targetu:",
-                        state.dataset.columns,
-                        index=default_idx,
-                        help="⭐ = zalecane przez AI"
-                    )
-                
-                with col2:
-                    if st.button("✅ Zatwierdź", type="primary"):
-                        state.target_column = selected_target
-                        st.success(f"Target: {selected_target}")
-                        st.rerun()
-                
-                # Podgląd targetu
                 if selected_target:
-                    with st.expander("👀 Podgląd targetu", expanded=True):
+                    state.target_column = selected_target
+                    st.success(f"✅ Target ustawiony: {selected_target}")
+                    
+                    # Podgląd targetu
+                    with st.expander("👀 Podgląd wybranego targetu", expanded=True):
                         target_series = state.dataset[selected_target]
                         
                         col1, col2, col3, col4 = st.columns(4)
@@ -643,6 +609,12 @@ def main():
                         if problem_type.lower() == "classification":
                             value_counts = target_series.value_counts().head(10)
                             st.bar_chart(value_counts)
+                            
+                            # Sprawdź balans klas
+                            if len(value_counts) > 1:
+                                imbalance_ratio = value_counts.max() / value_counts.min()
+                                if imbalance_ratio > 3:
+                                    st.warning(f"⚠️ Niebalans klas: {imbalance_ratio:.1f}:1")
                         else:
                             fig = px.histogram(target_series.dropna(), title="Rozkład wartości")
                             st.plotly_chart(fig, use_container_width=True)
