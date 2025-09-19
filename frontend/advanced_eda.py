@@ -1,4 +1,4 @@
-# frontend/advanced_eda.py — Zaawansowane komponenty EDA z rozwijalnymi widokami
+# frontend/advanced_eda.py — ROZBUDOWANE EDA z nowymi zakładkami i lepszymi wizualizacjami
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple, Any
@@ -8,29 +8,28 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from pandas.api.types import is_datetime64_any_dtype  # dla bezpiecznego describe()
+from pandas.api.types import is_datetime64_any_dtype
+from sklearn.preprocessing import LabelEncoder
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.cluster import KMeans
 
 # -----------------------------
-# USTAWIENIA GLOBALNE (lekko-konfigurowalne)
+# USTAWIENIA GLOBALNE
 # -----------------------------
-FAST_LIMIT_ROWS = 50_000       # ile wierszy zostawić w trybie szybkim
-MISSING_HEATMAP_MAX_ROWS = 800 # próbkowanie wierszy na mapie braków
-MISSING_HEATMAP_MAX_COLS = 120 # limit kolumn na mapie braków
-TOP_CATEG_LEVELS = 50          # przycinanie liczby kategorii
-TOP_CORR_PAIRS = 2000          # ile par korelacyjnych liczyć / wyświetlać maks.
-TOP_CORR_SHOW = 30             # ile top korelacji pokazać w tabeli
+FAST_LIMIT_ROWS = 50_000       
+MISSING_HEATMAP_MAX_ROWS = 800 
+MISSING_HEATMAP_MAX_COLS = 120 
+TOP_CATEG_LEVELS = 50          
+TOP_CORR_PAIRS = 2000          
+TOP_CORR_SHOW = 30             
 
 # -----------------------------
-# POMOCNICZE FUNKCJE (cache + sampling)
+# CACHE FUNCTIONS
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def _describe_df(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Bezpieczny opis DataFrame:
-    - Na nowszych Pandas próbuje datetime_is_numeric=True.
-    - Na starszych: każdą kolumnę datetime konwertuje do liczby ns od epoki (float, NaT->NaN),
-      po czym wywołuje describe(include="all").
-    """
+    """Bezpieczny opis DataFrame z obsługą datetime."""
     try:
         return df.copy().describe(include="all", datetime_is_numeric=True)
     except TypeError:
@@ -49,7 +48,7 @@ def _describe_df(df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def _value_counts_head(s: pd.Series, top: int = TOP_CATEG_LEVELS) -> pd.DataFrame:
-    """Zwraca top-n value_counts jako DataFrame (cache'owane)."""
+    """Zwraca top-n value_counts jako DataFrame."""
     vc = s.value_counts(dropna=False)
     if len(vc) > top:
         vc = vc.head(top)
@@ -65,8 +64,51 @@ def _corr_matrix(numeric_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     return safe_df.corr()
 
+@st.cache_data(show_spinner=False)
+def _compute_pca(df: pd.DataFrame, n_components: int = 2) -> Tuple[np.ndarray, np.ndarray]:
+    """Oblicza PCA dla danych numerycznych."""
+    numeric_df = df.select_dtypes(include=[np.number])
+    if numeric_df.shape[1] < 2:
+        return np.array([]), np.array([])
+    
+    # Wypełnij braki medianą
+    filled_df = numeric_df.fillna(numeric_df.median())
+    
+    pca = PCA(n_components=n_components)
+    components = pca.fit_transform(filled_df)
+    explained_variance = pca.explained_variance_ratio_
+    
+    return components, explained_variance
+
+@st.cache_data(show_spinner=False)
+def _detect_outliers_iqr(df: pd.DataFrame) -> Dict[str, pd.Series]:
+    """Wykrywa outliers metodą IQR dla kolumn numerycznych."""
+    outliers = {}
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    
+    for col in numeric_cols:
+        series = df[col].dropna()
+        if len(series) < 4:
+            continue
+            
+        Q1 = series.quantile(0.25)
+        Q3 = series.quantile(0.75)
+        IQR = Q3 - Q1
+        
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        
+        outlier_mask = (df[col] < lower_bound) | (df[col] > upper_bound)
+        if outlier_mask.sum() > 0:
+            outliers[col] = df[col][outlier_mask]
+    
+    return outliers
+
+# -----------------------------
+# HELPER FUNCTIONS
+# -----------------------------
 def _maybe_sample(df: pd.DataFrame, fast_mode: bool, limit: int = FAST_LIMIT_ROWS) -> pd.DataFrame:
-    """Jeśli fast_mode aktywny, próbkowanie wierszy dla płynności."""
+    """Próbkowanie dla szybkości."""
     if not fast_mode:
         return df
     if len(df) > limit:
@@ -74,7 +116,7 @@ def _maybe_sample(df: pd.DataFrame, fast_mode: bool, limit: int = FAST_LIMIT_ROW
     return df
 
 def _safe_mode(series: pd.Series) -> str:
-    """Zwraca najczęstszą wartość lub 'N/A' bez wyjątków."""
+    """Zwraca najczęstszą wartość lub 'N/A'."""
     try:
         m = series.mode(dropna=True)
         return str(m.iloc[0]) if len(m) > 0 else "N/A"
@@ -82,23 +124,32 @@ def _safe_mode(series: pd.Series) -> str:
         return "N/A"
 
 def _first_non_null(series: pd.Series) -> str:
-    """Zwraca pierwszy niepusty przykład lub 'N/A'."""
+    """Zwraca pierwszy niepusty przykład."""
     try:
         drop = series.dropna()
         return str(drop.iloc[0]) if len(drop) > 0 else "N/A"
     except Exception:
         return "N/A"
 
+def _get_color_palette():
+    """Zwraca paletę kolorów z session_state."""
+    theme = st.session_state.get('tmiv_color_theme', 'default')
+    palette_map = {
+        'default': px.colors.qualitative.Set1,
+        'viridis': px.colors.sequential.Viridis,
+        'plasma': px.colors.sequential.Plasma,
+        'blues': px.colors.sequential.Blues,
+        'reds': px.colors.sequential.Reds,
+        'greens': px.colors.sequential.Greens
+    }
+    return palette_map.get(theme, px.colors.qualitative.Set1)
+
+
 class AdvancedEDAComponents:
-    """
-    Zaawansowane komponenty EDA z interaktywnymi wizualizacjami.
-    Automatycznie dostosowuje się do typu danych i problemu.
-    """
+    """Zaawansowane komponenty EDA z nowymi funkcjami analitycznymi."""
+    
     def __init__(self):
-        self.color_palette = [
-            '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
-            '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43'
-        ]
+        self.color_palette = _get_color_palette()
 
     def render_comprehensive_eda(self, df: pd.DataFrame, target_col: Optional[str] = None) -> None:
         if df is None or df.empty:
@@ -106,87 +157,174 @@ class AdvancedEDAComponents:
             return
 
         st.subheader("📊 Zaawansowana Analiza Eksploracyjna (EDA)")
+        st.markdown("**Komprehensywna analiza danych z wizualizacjami i statystykami opisowymi**")
 
-        # Tryb szybki (sampling)
+        # Tryb szybki
         fast_mode = st.toggle(
-            "⚡ Tryb szybki (sampling i ograniczenia dla dużych plików)",
+            "⚡ Tryb szybki (optymalizacja wydajności)",
             value=True,
-            help=f"Próbkowanie do ~{FAST_LIMIT_ROWS:,} wierszy, limity kategorii i korelacji dla płynności."
+            help=f"Próbkowanie do {FAST_LIMIT_ROWS:,} wierszy i ograniczenia dla płynności"
         )
         df_view = _maybe_sample(df, fast_mode, FAST_LIMIT_ROWS)
+
+        if fast_mode and len(df) > FAST_LIMIT_ROWS:
+            st.info(f"🔬 Analiza oparta na próbce {len(df_view):,} z {len(df):,} wierszy")
 
         # Szybkie statystyki
         self._render_quick_stats_row(df_view)
 
-        # Sekcje
-        with st.expander("🔍 Profil danych i jakość", expanded=False):
+        # ROZBUDOWANE SEKCJE EDA
+        st.markdown("---")
+        
+        # Organizacja w zakładkach - NOWE ZAKŁADKI
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+            "🔍 Profil danych",
+            "📈 Rozkłady", 
+            "🌐 Korelacje",
+            "📊 Kategorie",
+            "🎯 Target",
+            "🔗 Interakcje",
+            "⚠️ Anomalie",
+            "🧬 Redukcja wymiarów",  # NOWA
+            "📋 Raport jakości"       # NOWA
+        ])
+
+        with tab1:
             self._render_data_quality_profile(df_view, fast_mode)
 
-        with st.expander("📈 Rozkłady i histogramy", expanded=False):
+        with tab2:
             self._render_distributions(df_view, target_col, fast_mode)
 
-        with st.expander("🌐 Macierz korelacji", expanded=False):
+        with tab3:
             self._render_correlation_analysis(df_view, target_col, fast_mode)
 
-        with st.expander("📊 Analiza kategorii", expanded=False):
+        with tab4:
             self._render_categorical_analysis(df_view, target_col, fast_mode)
 
-        with st.expander("🎯 Analiza targetu", expanded=bool(target_col)):
+        with tab5:
             if target_col and target_col in df_view.columns:
                 self._render_target_analysis(df_view, target_col)
             else:
                 st.info("Wybierz target aby zobaczyć analizę.")
 
-        with st.expander("🔗 Interakcje między cechami", expanded=False):
+        with tab6:
             self._render_feature_interactions(df_view, target_col, fast_mode)
 
-        with st.expander("⚠️ Anomalie i wartości odstające", expanded=False):
+        with tab7:
             self._render_outlier_detection(df_view, fast_mode)
 
+        with tab8:  # NOWA ZAKŁADKA
+            self._render_dimensionality_reduction(df_view, target_col, fast_mode)
+
+        with tab9:  # NOWA ZAKŁADKA  
+            self._render_data_quality_report(df_view, target_col)
+
     def _render_quick_stats_row(self, df: pd.DataFrame) -> None:
-        cols = st.columns(6)
+        """Rozbudowany rząd szybkich statystyk."""
+        cols = st.columns(7)  # Dodana jedna kolumna
+        
         with cols[0]:
             st.metric("Wiersze", f"{len(df):,}")
         with cols[1]:
             st.metric("Kolumny", f"{len(df.columns):,}")
         with cols[2]:
-            st.metric("Numeryczne", df.select_dtypes(include=[np.number]).shape[1])
+            numeric_count = df.select_dtypes(include=[np.number]).shape[1]
+            st.metric("Numeryczne", numeric_count)
         with cols[3]:
-            st.metric("Kategoryczne", df.select_dtypes(include=['object', 'category']).shape[1])
+            cat_count = df.select_dtypes(include=['object', 'category']).shape[1]
+            st.metric("Kategoryczne", cat_count)
         with cols[4]:
-            st.metric("Braki", f"{int(df.isna().sum().sum()):,}")
+            missing_count = int(df.isna().sum().sum())
+            st.metric("Braki", f"{missing_count:,}")
         with cols[5]:
             memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
             st.metric("Pamięć", f"{memory_mb:.1f} MB")
+        with cols[6]:  # NOWA METRYKA
+            duplicate_count = df.duplicated().sum()
+            st.metric("Duplikaty", f"{duplicate_count:,}")
 
     def _render_data_quality_profile(self, df: pd.DataFrame, fast_mode: bool) -> None:
-        st.write("### Profil jakości danych")
+        """Rozbudowany profil jakości danych."""
+        st.write("### 🔍 Szczegółowy profil danych")
+        
+        # Profil kolumn z dodatkowymi metrykami
         profile_data = []
         for col in df.columns:
             series = df[col]
+            dtype_info = str(series.dtype)
+            
+            # Dodatkowe analizy
+            memory_usage = series.memory_usage(deep=True) / 1024  # KB
+            
+            if pd.api.types.is_numeric_dtype(series):
+                try:
+                    skewness = series.skew()
+                    kurtosis = series.kurtosis()
+                    additional_info = f"Skew: {skewness:.2f}, Kurt: {kurtosis:.2f}"
+                except:
+                    additional_info = "N/A"
+            else:
+                additional_info = f"Najdłuższy: {series.astype(str).str.len().max()} znaków"
+            
             profile_data.append({
                 'Kolumna': col,
-                'Typ': str(series.dtype),
+                'Typ': dtype_info,
                 'Braki': int(series.isna().sum()),
                 'Braki %': f"{series.isna().mean() * 100:.1f}%",
                 'Unikalne': int(series.nunique(dropna=True)),
-                'Unikalne %': f"{(series.nunique(dropna=True) / max(len(series), 1)) * 100:.1f}%",
+                'Unikalność %': f"{(series.nunique(dropna=True) / max(len(series), 1)) * 100:.1f}%",
+                'Pamięć (KB)': f"{memory_usage:.1f}",
                 'Najczęstsza': _safe_mode(series),
+                'Info dodatkowe': additional_info,
                 'Przykład': _first_non_null(series)
             })
-        st.dataframe(pd.DataFrame(profile_data), use_container_width=True, hide_index=True)
+        
+        profile_df = pd.DataFrame(profile_data)
+        st.dataframe(profile_df, use_container_width=True, hide_index=True)
 
+        # Analiza braków danych - ROZBUDOWANA
         if df.isna().any().any():
-            show_heatmap = st.checkbox(
-                "Pokaż mapę braków danych (próbkowaną dla płynności)",
-                value=False,
-                help="Dla bardzo szerokich lub długich danych wizualizacja może być ciężka."
-            )
+            st.write("### 🕳️ Analiza braków danych")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Statystyki braków
+                missing_stats = df.isna().sum().sort_values(ascending=False)
+                missing_stats = missing_stats[missing_stats > 0]
+                
+                if not missing_stats.empty:
+                    fig_missing = px.bar(
+                        x=missing_stats.values,
+                        y=missing_stats.index,
+                        orientation='h',
+                        title="Braki danych według kolumn",
+                        color=missing_stats.values,
+                        color_continuous_scale='Reds'
+                    )
+                    fig_missing.update_layout(height=max(300, len(missing_stats) * 25))
+                    st.plotly_chart(fig_missing, use_container_width=True)
+            
+            with col2:
+                # Wzorce braków
+                if st.checkbox("Pokaż wzorce braków danych", help="Analiza kombinacji braków"):
+                    missing_combinations = df.isna().groupby(list(df.columns)).size().sort_values(ascending=False)
+                    if len(missing_combinations) > 1:
+                        st.write("**Top kombinacje braków:**")
+                        for pattern, count in missing_combinations.head(5).items():
+                            missing_cols = [col for col, is_missing in zip(df.columns, pattern) if is_missing]
+                            if missing_cols:
+                                st.write(f"- {count:,} wierszy: {', '.join(missing_cols)}")
+            
+            # Heatmapa braków - ulepszona
+            show_heatmap = st.checkbox("Pokaż heatmapę braków danych")
             if show_heatmap:
                 missing_data = df.isna()
                 cols = list(missing_data.columns)
                 if len(cols) > MISSING_HEATMAP_MAX_COLS:
                     cols = cols[:MISSING_HEATMAP_MAX_COLS]
+                    st.info(f"Pokazuję pierwsze {MISSING_HEATMAP_MAX_COLS} kolumn")
+                
                 md_cols = missing_data[cols]
                 if len(md_cols) > MISSING_HEATMAP_MAX_ROWS:
                     md_cols = md_cols.sample(MISSING_HEATMAP_MAX_ROWS, random_state=42)
@@ -196,18 +334,433 @@ class AdvancedEDAComponents:
                     x=list(md_cols.columns),
                     y=[f"Row {i}" for i in md_cols.index],
                     colorscale=[[0, '#f0f0f0'], [1, '#ff4444']],
-                    showscale=False
+                    showscale=True,
+                    colorbar=dict(title="Brak danych")
                 ))
                 fig.update_layout(
-                    title="Mapa braków danych (czerwone = brak) – próbkowana",
+                    title="Mapa braków danych (czerwone = brak)",
                     height=400,
                     xaxis_title="Kolumny",
-                    yaxis_title="Wiersze (próbka)"
+                    yaxis_title="Wiersze"
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
+    def _render_dimensionality_reduction(self, df: pd.DataFrame, target_col: Optional[str], fast_mode: bool) -> None:
+        """NOWA: Analiza redukcji wymiarów."""
+        st.write("### 🧬 Redukcja wymiarów i analiza skupień")
+        st.markdown("**Wizualizacja danych w przestrzeni o obniżonej wymiarowości**")
+        
+        # Sprawdź czy są dane numeryczne
+        numeric_df = df.select_dtypes(include=[np.number])
+        if target_col and target_col in numeric_df.columns:
+            numeric_df = numeric_df.drop(columns=[target_col])
+        
+        if numeric_df.shape[1] < 2:
+            st.warning("Za mało cech numerycznych do analizy redukcji wymiarów (wymagane minimum 2).")
+            return
+        
+        # Opcje analizy
+        reduction_method = st.selectbox(
+            "Wybierz metodę redukcji:",
+            ["PCA", "t-SNE"],
+            help="PCA - liniowa, szybka; t-SNE - nieliniowa, wolniejsza ale lepiej pokazuje klastry"
+        )
+        
+        col1, col2 = st.columns(2)
+        
+        # Parametry
+        with col1:
+            if reduction_method == "PCA":
+                n_components = st.slider("Liczba komponentów PCA:", 2, min(5, numeric_df.shape[1]), 2)
+            else:
+                perplexity = st.slider("Perplexity (t-SNE):", 5, min(50, len(df)//4), 30)
+        
+        with col2:
+            show_clusters = st.checkbox("Pokaż klastry (K-means)", value=False)
+            if show_clusters:
+                n_clusters = st.slider("Liczba klastrów:", 2, 10, 3)
+        
+        # Oblicz redukcję wymiarów
+        try:
+            if reduction_method == "PCA":
+                components, explained_var = _compute_pca(numeric_df, n_components)
+                
+                if components.size == 0:
+                    st.error("Nie udało się obliczyć PCA")
+                    return
+                
+                # Wykres PCA
+                if n_components == 2:
+                    fig = go.Figure()
+                    
+                    # Kolorowanie według targetu jeśli dostępny
+                    if target_col and target_col in df.columns:
+                        target_values = df[target_col]
+                        fig.add_trace(go.Scatter(
+                            x=components[:, 0],
+                            y=components[:, 1],
+                            mode='markers',
+                            marker=dict(
+                                color=target_values,
+                                colorscale='viridis',
+                                showscale=True,
+                                colorbar=dict(title=target_col)
+                            ),
+                            text=target_values,
+                            name='Data points'
+                        ))
+                    else:
+                        fig.add_trace(go.Scatter(
+                            x=components[:, 0],
+                            y=components[:, 1],
+                            mode='markers',
+                            marker=dict(color='blue', opacity=0.6),
+                            name='Data points'
+                        ))
+                    
+                    # Dodaj klastry jeśli wybrane
+                    if show_clusters:
+                        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+                        cluster_labels = kmeans.fit_predict(components)
+                        
+                        fig.add_trace(go.Scatter(
+                            x=components[:, 0],
+                            y=components[:, 1],
+                            mode='markers',
+                            marker=dict(
+                                color=cluster_labels,
+                                colorscale='Set1',
+                                symbol='circle-open',
+                                size=10,
+                                line=dict(width=2)
+                            ),
+                            name='Klastry',
+                            showlegend=False
+                        ))
+                        
+                        # Centra klastrów
+                        centers = kmeans.cluster_centers_
+                        fig.add_trace(go.Scatter(
+                            x=centers[:, 0],
+                            y=centers[:, 1],
+                            mode='markers',
+                            marker=dict(
+                                color='red',
+                                size=15,
+                                symbol='x',
+                                line=dict(width=3)
+                            ),
+                            name='Centra klastrów'
+                        ))
+                    
+                    fig.update_layout(
+                        title=f"PCA - Analiza głównych składowych",
+                        xaxis_title=f"PC1 ({explained_var[0]:.1%} wariancji)",
+                        yaxis_title=f"PC2 ({explained_var[1]:.1%} wariancji)",
+                        height=600
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Statystyki PCA
+                    st.write("#### 📊 Statystyki PCA")
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Wariancja PC1", f"{explained_var[0]:.1%}")
+                    with col2:
+                        st.metric("Wariancja PC2", f"{explained_var[1]:.1%}")
+                    with col3:
+                        total_var = explained_var[:2].sum()
+                        st.metric("Całkowita wariancja", f"{total_var:.1%}")
+                
+                # Wykres wszystkich komponentów
+                if n_components > 2:
+                    st.write("#### 📈 Wariancja wyjaśniona przez komponenty")
+                    fig_var = px.bar(
+                        x=range(1, len(explained_var) + 1),
+                        y=explained_var,
+                        title="Wariancja wyjaśniona przez każdy komponent PCA"
+                    )
+                    fig_var.update_layout(
+                        xaxis_title="Numer komponentu",
+                        yaxis_title="Wariancja wyjaśniona"
+                    )
+                    st.plotly_chart(fig_var, use_container_width=True)
+            
+            else:  # t-SNE
+                st.info("🔄 Obliczanie t-SNE... To może potrwać chwilę.")
+                
+                # Przygotowanie danych
+                filled_df = numeric_df.fillna(numeric_df.median())
+                
+                # Próbkowanie dla t-SNE jeśli za duże
+                if len(filled_df) > 5000:
+                    filled_df = filled_df.sample(5000, random_state=42)
+                    st.info(f"Użyto próbki 5000 wierszy dla t-SNE")
+                
+                from sklearn.manifold import TSNE
+                tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, n_iter=1000)
+                components = tsne.fit_transform(filled_df)
+                
+                # Wykres t-SNE
+                fig = go.Figure()
+                
+                if target_col and target_col in df.columns:
+                    target_sample = df[target_col].iloc[:len(components)]
+                    fig.add_trace(go.Scatter(
+                        x=components[:, 0],
+                        y=components[:, 1],
+                        mode='markers',
+                        marker=dict(
+                            color=target_sample,
+                            colorscale='viridis',
+                            showscale=True,
+                            colorbar=dict(title=target_col)
+                        ),
+                        text=target_sample,
+                        name='Data points'
+                    ))
+                else:
+                    fig.add_trace(go.Scatter(
+                        x=components[:, 0],
+                        y=components[:, 1],
+                        mode='markers',
+                        marker=dict(color='blue', opacity=0.6),
+                        name='Data points'
+                    ))
+                
+                fig.update_layout(
+                    title=f"t-SNE - Nieliniowa redukcja wymiarów",
+                    xaxis_title="t-SNE 1",
+                    yaxis_title="t-SNE 2",
+                    height=600
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        except Exception as e:
+            st.error(f"Błąd podczas redukcji wymiarów: {str(e)}")
+
+    def _render_data_quality_report(self, df: pd.DataFrame, target_col: Optional[str]) -> None:
+        """NOWA: Komprehensywny raport jakości danych."""
+        st.write("### 📋 Raport jakości danych")
+        st.markdown("**Automatyczna ocena gotowości danych do modelowania ML**")
+        
+        # Ogólna ocena jakości
+        quality_score = self._calculate_quality_score(df, target_col)
+        
+        # Wizualny wskaźnik jakości
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            if quality_score >= 80:
+                st.success(f"🏆 **Wysoka jakość danych: {quality_score}/100**")
+                quality_color = "green"
+            elif quality_score >= 60:
+                st.info(f"✅ **Dobra jakość danych: {quality_score}/100**")
+                quality_color = "blue"
+            elif quality_score >= 40:
+                st.warning(f"⚠️ **Średnia jakość danych: {quality_score}/100**")
+                quality_color = "orange"
+            else:
+                st.error(f"❌ **Niska jakość danych: {quality_score}/100**")
+                quality_color = "red"
+        
+        # Szczegółowa analiza problemów
+        st.write("#### 🔍 Szczegółowa analiza problemów")
+        
+        problems = []
+        recommendations = []
+        
+        # 1. Braki danych
+        missing_pct = (df.isna().sum().sum() / (len(df) * len(df.columns))) * 100
+        if missing_pct > 20:
+            problems.append(f"Wysokie procent braków danych: {missing_pct:.1f}%")
+            recommendations.append("Rozważ imputację lub usunięcie kolumn z wieloma brakami")
+        elif missing_pct > 5:
+            problems.append(f"Umiarkowany procent braków: {missing_pct:.1f}%")
+            recommendations.append("Zastosuj strategię imputacji przed treningiem")
+        
+        # 2. Duplikaty
+        duplicates = df.duplicated().sum()
+        if duplicates > 0:
+            dup_pct = (duplicates / len(df)) * 100
+            problems.append(f"Duplikaty: {duplicates:,} wierszy ({dup_pct:.1f}%)")
+            recommendations.append("Usuń duplikaty aby uniknąć data leakage")
+        
+        # 3. Kolumny stałe
+        constant_cols = [col for col in df.columns if df[col].nunique() <= 1]
+        if constant_cols:
+            problems.append(f"Kolumny stałe: {len(constant_cols)} ({', '.join(constant_cols[:3])}{'...' if len(constant_cols) > 3 else ''})")
+            recommendations.append("Usuń kolumny stałe - nie wnoszą informacji")
+        
+        # 4. Wysoka kardynalność
+        high_card_cols = []
+        for col in df.select_dtypes(include=['object']).columns:
+            if df[col].nunique() > len(df) * 0.5:
+                high_card_cols.append(col)
+        
+        if high_card_cols:
+            problems.append(f"Wysoka kardynalność: {len(high_card_cols)} kolumn")
+            recommendations.append("Rozważ feature hashing lub target encoding dla kolumn tekstowych")
+        
+        # 5. Niebalans klas (jeśli target jest kategoryczny)
+        if target_col and target_col in df.columns:
+            if pd.api.types.is_categorical_dtype(df[target_col]) or df[target_col].dtype == 'object':
+                value_counts = df[target_col].value_counts()
+                if len(value_counts) > 1:
+                    imbalance_ratio = value_counts.max() / value_counts.min()
+                    if imbalance_ratio > 10:
+                        problems.append(f"Silny niebalans klas: {imbalance_ratio:.1f}:1")
+                        recommendations.append("Użyj technik balansowania klas (SMOTE, undersampling)")
+                    elif imbalance_ratio > 3:
+                        problems.append(f"Niebalans klas: {imbalance_ratio:.1f}:1")
+                        recommendations.append("Monitoruj metryki dla każdej klasy oddzielnie")
+        
+        # Wyświetl problemy i rekomendacje
+        if problems:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**⚠️ Wykryte problemy:**")
+                for i, problem in enumerate(problems, 1):
+                    st.write(f"{i}. {problem}")
+            
+            with col2:
+                st.write("**💡 Rekomendacje:**")
+                for i, rec in enumerate(recommendations, 1):
+                    st.write(f"{i}. {rec}")
+        else:
+            st.success("✅ Nie wykryto poważnych problemów z jakością danych!")
+        
+        # Raport przydatności kolumn
+        st.write("#### 📊 Przydatność kolumn do modelowania")
+        
+        utility_data = []
+        for col in df.columns:
+            if col == target_col:
+                continue
+                
+            series = df[col]
+            utility_score = self._calculate_column_utility(series)
+            
+            issues = []
+            if series.isna().mean() > 0.5:
+                issues.append("Dużo braków")
+            if series.nunique() <= 1:
+                issues.append("Stała wartość")
+            if pd.api.types.is_object_dtype(series) and series.nunique() > len(df) * 0.5:
+                issues.append("Wysoka kardynalność")
+            
+            utility_data.append({
+                'Kolumna': col,
+                'Ocena przydatności': utility_score,
+                'Typ': str(series.dtype),
+                'Unikalne': series.nunique(),
+                'Braki %': f"{series.isna().mean() * 100:.1f}%",
+                'Potencjalne problemy': ', '.join(issues) if issues else 'Brak'
+            })
+        
+        utility_df = pd.DataFrame(utility_data)
+        utility_df = utility_df.sort_values('Ocena przydatności', ascending=False)
+        
+        # Kolorowanie według przydatności
+        def color_utility(val):
+            if val >= 80:
+                return 'background-color: lightgreen'
+            elif val >= 60:
+                return 'background-color: lightyellow'  
+            elif val >= 40:
+                return 'background-color: lightorange'
+            else:
+                return 'background-color: lightcoral'
+        
+        styled_df = utility_df.style.applymap(color_utility, subset=['Ocena przydatności'])
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+        
+        # Podsumowanie gotowości
+        st.write("#### 🎯 Gotowość do treningu ML")
+        
+        ready_cols = len([col for col in utility_df['Kolumna'] if utility_df[utility_df['Kolumna'] == col]['Ocena przydatności'].iloc[0] >= 60])
+        total_cols = len(utility_df)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Ogólna jakość", f"{quality_score}/100")
+        with col2:
+            st.metric("Przydatne kolumny", f"{ready_cols}/{total_cols}")
+        with col3:
+            st.metric("% gotowości", f"{(ready_cols/max(total_cols,1)*100):.0f}%")
+        with col4:
+            if quality_score >= 70 and ready_cols/max(total_cols,1) >= 0.6:
+                st.success("✅ Gotowy")
+            else:
+                st.warning("⚠️ Wymaga poprawek")
+
+    def _calculate_quality_score(self, df: pd.DataFrame, target_col: Optional[str]) -> int:
+        """Oblicza ogólną ocenę jakości danych (0-100)."""
+        score = 100
+        
+        # Kara za braki danych
+        missing_pct = (df.isna().sum().sum() / (len(df) * len(df.columns))) * 100
+        score -= min(30, missing_pct)
+        
+        # Kara za duplikaty
+        dup_pct = (df.duplicated().sum() / len(df)) * 100
+        score -= min(20, dup_pct * 2)
+        
+        # Kara za kolumny stałe
+        constant_cols = sum(1 for col in df.columns if df[col].nunique() <= 1)
+        score -= min(15, constant_cols * 5)
+        
+        # Kara za zbyt małą próbkę
+        if len(df) < 100:
+            score -= 20
+        elif len(df) < 1000:
+            score -= 10
+        
+        # Bonus za dobrą proporcję cech/próbek
+        feature_ratio = len(df.columns) / len(df)
+        if feature_ratio < 0.1:
+            score += 5
+        elif feature_ratio > 0.5:
+            score -= 10
+        
+        return max(0, min(100, int(score)))
+    
+    def _calculate_column_utility(self, series: pd.Series) -> int:
+        """Oblicza przydatność kolumny do modelowania (0-100)."""
+        score = 100
+        
+        # Kara za braki
+        missing_pct = series.isna().mean() * 100
+        score -= min(40, missing_pct)
+        
+        # Kara za stałość
+        if series.nunique() <= 1:
+            score = 0
+        
+        # Kara za bardzo wysoką kardynalność (dla tekstowych)
+        if pd.api.types.is_object_dtype(series):
+            unique_ratio = series.nunique() / len(series)
+            if unique_ratio > 0.5:
+                score -= 30
+        
+        # Bonus za rozsądną zmienność
+        if pd.api.types.is_numeric_dtype(series):
+            try:
+                std = series.std()
+                if pd.notna(std) and std > 0:
+                    score += 5
+            except:
+                pass
+        
+        return max(0, min(100, int(score)))
+
+    # Pozostałe metody bez zmian lub z drobnymi ulepszeniami...
     def _render_distributions(self, df: pd.DataFrame, target_col: Optional[str], fast_mode: bool) -> None:
-        st.write("### Rozkłady zmiennych")
+        """Ulepszone rozkłady z dodatkowymi statystykami."""
+        st.write("### 📈 Rozkłady zmiennych")
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
 
@@ -221,30 +774,63 @@ class AdvancedEDAComponents:
             if numeric_cols:
                 default_num = numeric_cols[: min(4, len(numeric_cols))]
                 selected_numeric = st.multiselect("Wybierz kolumny numeryczne:", numeric_cols, default=default_num)
+                
                 if selected_numeric:
+                    # Opcje wizualizacji
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        chart_type = st.selectbox("Typ wykresu:", ["Histogram", "Box plot", "Violin plot"])
+                    with col2:
+                        show_stats = st.checkbox("Pokaż statystyki opisowe", value=True)
+                    
+                    # Wykresy
                     n_cols = min(2, len(selected_numeric))
                     n_rows = (len(selected_numeric) + n_cols - 1) // n_cols
                     fig = make_subplots(rows=n_rows, cols=n_cols, subplot_titles=selected_numeric)
+                    
                     for i, col in enumerate(selected_numeric):
                         row = i // n_cols + 1
                         col_pos = i % n_cols + 1
-                        fig.add_trace(
-                            go.Histogram(
-                                x=df[col].dropna(),
-                                name=col,
-                                marker_color=self.color_palette[i % len(self.color_palette)]
-                            ),
-                            row=row, col=col_pos
-                        )
-                    fig.update_layout(title="Rozkłady zmiennych numerycznych", height=300 * n_rows, showlegend=False)
+                        
+                        if chart_type == "Histogram":
+                            fig.add_trace(
+                                go.Histogram(
+                                    x=df[col].dropna(),
+                                    name=col,
+                                    marker_color=self.color_palette[i % len(self.color_palette)]
+                                ),
+                                row=row, col=col_pos
+                            )
+                        elif chart_type == "Box plot":
+                            fig.add_trace(
+                                go.Box(
+                                    y=df[col].dropna(),
+                                    name=col,
+                                    marker_color=self.color_palette[i % len(self.color_palette)]
+                                ),
+                                row=row, col=col_pos
+                            )
+                        else:  # Violin plot
+                            fig.add_trace(
+                                go.Violin(
+                                    y=df[col].dropna(),
+                                    name=col,
+                                    fillcolor=self.color_palette[i % len(self.color_palette)],
+                                    opacity=0.6
+                                ),
+                                row=row, col=col_pos
+                            )
+                    
+                    fig.update_layout(title=f"Rozkłady zmiennych numerycznych ({chart_type})", height=300 * n_rows, showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
 
-                    st.write("#### Statystyki opisowe")
-                    try:
-                        desc_stats = _describe_df(df[selected_numeric])[selected_numeric]
-                    except Exception:
-                        desc_stats = _describe_df(df[selected_numeric])
-                    st.dataframe(desc_stats, use_container_width=True)
+                    if show_stats:
+                        st.write("#### 📊 Statystyki opisowe")
+                        try:
+                            desc_stats = _describe_df(df[selected_numeric])
+                            st.dataframe(desc_stats.round(4), use_container_width=True)
+                        except Exception:
+                            st.info("Nie można wyświetlić statystyk opisowych")
             else:
                 st.info("Brak kolumn numerycznych do analizy.")
 
@@ -252,120 +838,170 @@ class AdvancedEDAComponents:
             if categorical_cols:
                 selected_categorical = st.selectbox("Wybierz kolumnę kategoryczną:", categorical_cols)
                 if selected_categorical:
-                    s = df[selected_categorical]
-                    # Stabilne value_counts (etykiety jako stringi, NaN -> "(NaN)")
-                    s_display = s.fillna("(NaN)").astype(str)
-                    top_n = st.slider("Ile najczęstszych kategorii pokazać", 5, 50, 20)
-                    vc = s_display.value_counts(dropna=False).head(top_n).reset_index()
-                    vc.columns = ["label", "count"]
-
-                    # wykres
-                    fig = px.bar(vc, x="count", y="label", orientation="h", title=f"Rozkład: {selected_categorical}")
-                    fig.update_layout(
-                        yaxis_title=selected_categorical,
-                        xaxis_title="Liczba wystąpień",
-                        height=max(400, len(vc) * 25),
-                        margin=dict(l=10, r=10, t=60, b=10),
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    col1, col2 = st.columns(2)
+                    col1, col2 = st.columns([3, 1])
+                    
                     with col1:
+                        s = df[selected_categorical]
+                        s_display = s.fillna("(NaN)").astype(str)
+                        top_n = st.slider("Liczba kategorii do pokazania:", 5, min(50, s.nunique()), 15)
+                        vc = s_display.value_counts(dropna=False).head(top_n).reset_index()
+                        vc.columns = ["label", "count"]
+
+                        chart_type = st.selectbox("Typ wykresu:", ["Bar plot", "Pie chart", "Donut chart"])
+                        
+                        if chart_type == "Pie chart":
+                            fig = px.pie(values=vc["count"], names=vc["label"], title=f"Rozkład: {selected_categorical}")
+                        elif chart_type == "Donut chart":
+                            fig = px.pie(values=vc["count"], names=vc["label"], title=f"Rozkład: {selected_categorical}", hole=0.4)
+                        else:  # Bar plot
+                            fig = px.bar(vc, x="count", y="label", orientation="h", title=f"Rozkład: {selected_categorical}")
+                            fig.update_layout(height=max(400, len(vc) * 25))
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        st.write("**📊 Statystyki:**")
                         st.metric("Unikalne kategorie", int(s.nunique(dropna=True)))
                         st.metric("Najczęstsza", str(vc.iloc[0]["label"]) if len(vc) else "—")
-                    with col2:
                         st.metric("Częstość najczęstszej", f"{int(vc.iloc[0]['count']):,}" if len(vc) else "—")
                         st.metric("Braki", f"{s.isna().mean() * 100:.1f}%")
+                        
+                        # Entropia (miara różnorodności)
+                        if len(vc) > 1:
+                            proportions = vc["count"] / vc["count"].sum()
+                            entropy = -np.sum(proportions * np.log2(proportions + 1e-10))
+                            st.metric("Entropia", f"{entropy:.2f}")
             else:
                 st.info("Brak kolumn kategorycznych do analizy.")
 
     def _render_correlation_analysis(self, df: pd.DataFrame, target_col: Optional[str], fast_mode: bool) -> None:
-        st.write("### Analiza korelacji")
+        """Rozbudowana analiza korelacji."""
+        st.write("### 🌐 Analiza korelacji")
 
         numeric_df = df.select_dtypes(include=[np.number])
         if numeric_df.shape[1] < 2:
-            st.info("Za mało kolumn numerycznych do analizy korelacji.")
+            st.info("Za mało kolumn numerycznych do analizy korelacji (wymagane minimum 2).")
             return
 
-        corr_matrix = _corr_matrix(numeric_df)
+        # Opcje analizy korelacji
+        col1, col2 = st.columns(2)
+        with col1:
+            corr_method = st.selectbox("Metoda korelacji:", ["pearson", "spearman", "kendall"])
+        with col2:
+            min_corr = st.slider("Minimalna korelacja do pokazania:", 0.0, 1.0, 0.1, 0.05)
+
+        corr_matrix = numeric_df.corr(method=corr_method)
         if corr_matrix.empty or corr_matrix.shape[1] < 2:
             st.info("Brak wystarczającej zmienności do policzenia korelacji.")
             return
 
+        # Heatmapa korelacji - ulepsziona
         cols = list(corr_matrix.columns)
-        max_cols = 80 if fast_mode else 160
+        max_cols = 30 if fast_mode else 50
         if len(cols) > max_cols:
             cols = cols[:max_cols]
-        cm_small = corr_matrix.loc[cols, cols]
+            st.info(f"Pokazuję korelacje dla pierwszych {max_cols} kolumn")
+        
+        cm_display = corr_matrix.loc[cols, cols]
 
         fig = go.Figure(data=go.Heatmap(
-            z=cm_small.values,
-            x=cm_small.columns,
-            y=cm_small.columns,
+            z=cm_display.values,
+            x=cm_display.columns,
+            y=cm_display.columns,
             colorscale='RdBu',
             zmid=0,
-            text=np.round(cm_small.values, 2),
+            text=np.round(cm_display.values, 3),
             texttemplate="%{text}",
-            textfont={"size": 10},
-            hoverongaps=False
+            textfont={"size": 8},
+            hoverongaps=False,
+            colorbar=dict(title="Korelacja")
         ))
-        fig.update_layout(title=f"Macierz korelacji (pierwsze {len(cols)} kolumn)", height=600, width=700)
+        
+        fig.update_layout(
+            title=f"Macierz korelacji ({corr_method})",
+            height=max(500, len(cols) * 15),
+            width=max(500, len(cols) * 15)
+        )
         st.plotly_chart(fig, use_container_width=True)
 
+        # Analiza korelacji z targetem
         if target_col and target_col in corr_matrix.columns:
-            st.write(f"#### Korelacje z targetem: {target_col}")
+            st.write(f"#### 🎯 Korelacje z targetem: {target_col}")
             target_corrs = corr_matrix[target_col].drop(target_col, errors="ignore").dropna()
-            target_corrs = target_corrs.abs().sort_values(ascending=False)
-            top_show = min(30, len(target_corrs))
-            if top_show > 0:
-                fig_bar = px.bar(
-                    x=target_corrs.values[:top_show],
-                    y=target_corrs.index[:top_show],
+            target_corrs_abs = target_corrs.abs().sort_values(ascending=False)
+            
+            # Filtruj po minimalnej korelacji
+            significant_corrs = target_corrs_abs[target_corrs_abs >= min_corr]
+            
+            if len(significant_corrs) > 0:
+                top_show = min(20, len(significant_corrs))
+                
+                # Wykres korelacji z targetem
+                fig_target = go.Figure()
+                
+                colors = ['red' if corr < 0 else 'blue' for corr in target_corrs[significant_corrs.index[:top_show]]]
+                
+                fig_target.add_trace(go.Bar(
+                    y=significant_corrs.index[:top_show],
+                    x=target_corrs[significant_corrs.index[:top_show]],
                     orientation='h',
-                    title=f"Korelacje z {target_col} (top {top_show})",
-                    color=target_corrs.values[:top_show],
-                    color_continuous_scale='viridis'
+                    marker_color=colors,
+                    text=[f"{val:.3f}" for val in target_corrs[significant_corrs.index[:top_show]]],
+                    textposition='auto'
+                ))
+                
+                fig_target.update_layout(
+                    title=f"Korelacje z {target_col} (|r| >= {min_corr})",
+                    xaxis_title="Korelacja",
+                    yaxis_title="Cechy",
+                    height=max(400, top_show * 25)
                 )
-                st.plotly_chart(fig_bar, use_container_width=True)
+                
+                st.plotly_chart(fig_target, use_container_width=True)
+                
+                # Tabela szczegółowa
+                corr_details = pd.DataFrame({
+                    'Cecha': significant_corrs.index[:top_show],
+                    'Korelacja': target_corrs[significant_corrs.index[:top_show]].round(4),
+                    'Korelacja bezwzględna': significant_corrs[:top_show].round(4)
+                })
+                
+                st.dataframe(corr_details, use_container_width=True, hide_index=True)
             else:
-                st.info("Brak istotnych korelacji z targetem.")
+                st.info(f"Brak korelacji >= {min_corr} z targetem {target_col}")
 
-        st.write("#### Najsilniejsze korelacje (sparowane)")
-        cols_for_pairs = list(corr_matrix.columns)
-        max_cols_pairs = 200 if fast_mode else 400
-        if len(cols_for_pairs) > max_cols_pairs:
-            cols_for_pairs = cols_for_pairs[:max_cols_pairs]
-        cm_pairs = corr_matrix.loc[cols_for_pairs, cols_for_pairs]
-
+        # Top korelacje między cechami
+        st.write("#### 🔗 Najsilniejsze korelacje między cechami")
         corr_pairs = []
-        ncols = len(cm_pairs.columns)
-        counted = 0
-        for i in range(ncols):
-            for j in range(i + 1, ncols):
-                corr_val = cm_pairs.iloc[i, j]
-                if pd.notna(corr_val):
-                    corr_pairs.append({
-                        'Kolumna 1': cm_pairs.columns[i],
-                        'Kolumna 2': cm_pairs.columns[j],
-                        'Korelacja': corr_val
-                    })
-                    counted += 1
-                    if counted >= TOP_CORR_PAIRS:
-                        break
-            if counted >= TOP_CORR_PAIRS:
-                break
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i + 1, len(corr_matrix.columns)):
+                if i != j:
+                    corr_val = corr_matrix.iloc[i, j]
+                    if pd.notna(corr_val) and abs(corr_val) >= min_corr:
+                        corr_pairs.append({
+                            'Cecha 1': corr_matrix.columns[i],
+                            'Cecha 2': corr_matrix.columns[j],
+                            'Korelacja': corr_val,
+                            'Korelacja bezwzględna': abs(corr_val)
+                        })
 
         if corr_pairs:
             corr_df = pd.DataFrame(corr_pairs)
-            corr_df = corr_df.reindex(corr_df['Korelacja'].abs().sort_values(ascending=False).index)
-            st.dataframe(corr_df.head(TOP_CORR_SHOW), use_container_width=True, hide_index=True)
-            if counted >= TOP_CORR_PAIRS:
-                st.caption(f"Pokazano top {TOP_CORR_SHOW} z ograniczonych {TOP_CORR_PAIRS} par (dla wydajności).")
+            corr_df = corr_df.sort_values('Korelacja bezwzględna', ascending=False)
+            
+            top_pairs = min(15, len(corr_df))
+            display_df = corr_df.head(top_pairs).round(4)
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            
+            if len(corr_df) > top_pairs:
+                st.info(f"Pokazano {top_pairs} z {len(corr_df)} par o korelacji >= {min_corr}")
         else:
-            st.info("Nie udało się wyznaczyć znaczących par korelacyjnych.")
+            st.info(f"Brak znaczących korelacji >= {min_corr}")
 
     def _render_categorical_analysis(self, df: pd.DataFrame, target_col: Optional[str], fast_mode: bool) -> None:
-        st.write("### Analiza zmiennych kategorycznych")
+        """Analiza zmiennych kategorycznych."""
+        st.write("### 📊 Analiza zmiennych kategorycznych")
         categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
         if target_col and target_col in categorical_cols:
             categorical_cols.remove(target_col)
@@ -384,7 +1020,6 @@ class AdvancedEDAComponents:
             with col3:
                 st.metric("Braki", f"{df[selected_cat].isna().mean() * 100:.1f}%")
 
-            # Stabilne value_counts bez set_index("value")
             s = df[selected_cat]
             s_display = s.fillna("(NaN)").astype(str)
             vc = s_display.value_counts(dropna=False).head(TOP_CATEG_LEVELS).reset_index()
@@ -396,39 +1031,53 @@ class AdvancedEDAComponents:
                 fig = px.pie(values=vc["count"], names=vc["label"], title=f"Rozkład kategorii: {selected_cat}")
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Analiza względem targetu (jeśli target istnieje)
+            # Analiza względem targetu
             if target_col and target_col in df.columns:
                 st.write(f"#### Analiza {selected_cat} vs {target_col}")
-                tgt = df[target_col].astype("category") if df[target_col].dtype == "O" else df[target_col]
-                if hasattr(tgt, "nunique") and tgt.nunique() > TOP_CATEG_LEVELS:
-                    st.info(f"Target ma wiele kategorii – przycinam do top {TOP_CATEG_LEVELS}.")
-                    top_tgt = tgt.value_counts().index[:TOP_CATEG_LEVELS]
-                    crosstab = pd.crosstab(s_display, tgt.where(tgt.isin(top_tgt)), normalize='index') * 100
-                    crosstab = crosstab.fillna(0.0)
-                else:
-                    crosstab = pd.crosstab(s_display, tgt, normalize='index') * 100
+                self._render_categorical_vs_target(df, selected_cat, target_col)
 
-                if crosstab.shape[0] > TOP_CATEG_LEVELS:
-                    st.info(f"Kolumna {selected_cat} ma wiele poziomów – pokazuję top {TOP_CATEG_LEVELS} wg supportu.")
-                    keep_rows = s_display.value_counts().index[:TOP_CATEG_LEVELS]
-                    crosstab = crosstab.loc[crosstab.index.intersection(keep_rows)]
-
-                if crosstab.empty:
-                    st.info("Brak danych do wykresu rozkładu względem targetu.")
-                else:
-                    fig_stack = go.Figure()
-                    for col in crosstab.columns:
-                        fig_stack.add_trace(go.Bar(name=str(col), x=crosstab.index.astype(str), y=crosstab[col]))
-                    fig_stack.update_layout(
-                        barmode='stack',
-                        title=f"Rozkład {target_col} w grupach {selected_cat}",
-                        yaxis_title="Procent",
-                        xaxis_title=selected_cat
-                    )
-                    st.plotly_chart(fig_stack, use_container_width=True)
+    def _render_categorical_vs_target(self, df: pd.DataFrame, cat_col: str, target_col: str) -> None:
+        """Analiza kategorii względem targetu."""
+        cat_series = df[cat_col].fillna("(NaN)").astype(str)
+        target_series = df[target_col]
+        
+        if pd.api.types.is_numeric_dtype(target_series):
+            # Target numeryczny - box plot
+            fig = px.box(
+                x=cat_series, 
+                y=target_series,
+                title=f"Rozkład {target_col} według {cat_col}"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Statystyki grupowe
+            group_stats = df.groupby(cat_series)[target_col].agg(['mean', 'median', 'std', 'count']).round(4)
+            st.dataframe(group_stats, use_container_width=True)
+            
+        else:
+            # Target kategoryczny - crosstab
+            crosstab = pd.crosstab(cat_series, target_series, normalize='index') * 100
+            
+            if not crosstab.empty:
+                fig = go.Figure()
+                for col in crosstab.columns:
+                    fig.add_trace(go.Bar(
+                        name=str(col), 
+                        x=crosstab.index, 
+                        y=crosstab[col]
+                    ))
+                
+                fig.update_layout(
+                    barmode='stack',
+                    title=f"Rozkład {target_col} w grupach {cat_col} (%)",
+                    yaxis_title="Procent",
+                    xaxis_title=cat_col
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
     def _render_target_analysis(self, df: pd.DataFrame, target_col: str) -> None:
-        st.write(f"### Analiza targetu: {target_col}")
+        """Szczegółowa analiza targetu."""
+        st.write(f"### 🎯 Analiza targetu: {target_col}")
         target_series = df[target_col]
 
         col1, col2, col3, col4 = st.columns(4)
@@ -447,39 +1096,91 @@ class AdvancedEDAComponents:
             self._render_categorical_target_analysis(target_series)
 
     def _render_numeric_target_analysis(self, target_series: pd.Series) -> None:
-        if target_series.dropna().empty:
-            st.info("Brak danych do wykresu histogramu.")
-        else:
-            fig = px.histogram(target_series.dropna(), title=f"Rozkład {target_series.name}", nbins=50)
-            st.plotly_chart(fig, use_container_width=True)
-
-        if target_series.dropna().empty:
-            st.info("Brak danych do wykresu pudełkowego.")
-        else:
-            fig_box = px.box(y=target_series.dropna(), title=f"Box plot - {target_series.name}")
+        """Analiza targetu numerycznego."""
+        clean_series = target_series.dropna()
+        
+        if clean_series.empty:
+            st.info("Brak danych do analizy.")
+            return
+            
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Histogram
+            fig_hist = px.histogram(
+                clean_series, 
+                title=f"Rozkład {target_series.name}",
+                nbins=min(50, int(np.sqrt(len(clean_series))))
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
+            
+        with col2:
+            # Box plot
+            fig_box = px.box(y=clean_series, title=f"Box plot - {target_series.name}")
             st.plotly_chart(fig_box, use_container_width=True)
 
-        stats = target_series.describe()
+        # Statystyki opisowe
+        st.write("#### 📊 Statystyki opisowe")
+        stats = clean_series.describe()
+        
+        # Dodatkowe statystyki
+        try:
+            stats['skewness'] = clean_series.skew()
+            stats['kurtosis'] = clean_series.kurtosis()
+        except:
+            pass
+            
         st.dataframe(stats.to_frame().T, use_container_width=True)
 
     def _render_categorical_target_analysis(self, target_series: pd.Series) -> None:
-        value_counts = target_series.value_counts()
+        """Analiza targetu kategorycznego."""
+        value_counts = target_series.value_counts(dropna=False)
         if value_counts.empty:
             st.info("Brak danych do analizy rozkładu klas.")
             return
 
-        fig = px.bar(x=value_counts.index.astype(str), y=value_counts.values, title=f"Rozkład klas - {target_series.name}")
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(value_counts.to_frame('Liczebność'), use_container_width=True)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Bar chart
+            fig = px.bar(
+                x=value_counts.index.astype(str), 
+                y=value_counts.values, 
+                title=f"Rozkład klas - {target_series.name}"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Pie chart
+            fig_pie = px.pie(
+                values=value_counts.values,
+                names=value_counts.index.astype(str),
+                title="Proporcje klas"
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
 
+        # Tabela z proporçjami
+        st.write("#### 📋 Szczegóły rozkładu klas")
+        class_df = pd.DataFrame({
+            'Klasa': value_counts.index,
+            'Liczebność': value_counts.values,
+            'Procent': (value_counts.values / value_counts.sum() * 100).round(2)
+        })
+        st.dataframe(class_df, use_container_width=True, hide_index=True)
+
+        # Analiza niebalansu
         if len(value_counts) > 1 and value_counts.min() > 0:
             imbalance_ratio = value_counts.max() / value_counts.min()
-            if imbalance_ratio > 3:
-                st.warning(f"⚠️ Wykryto niebalans klas (ratio: {imbalance_ratio:.1f}:1)")
-                st.info("💡 Rozważ techniki balansowania klas przed treningiem.")
+            if imbalance_ratio > 10:
+                st.error(f"⚠️ Bardzo silny niebalans klas (ratio: {imbalance_ratio:.1f}:1)")
+                st.info("💡 Rozważ techniki balansowania klas przed treningiem (SMOTE, undersampling).")
+            elif imbalance_ratio > 3:
+                st.warning(f"⚠️ Niebalans klas (ratio: {imbalance_ratio:.1f}:1)")
+                st.info("💡 Monitoruj metryki dla każdej klasy oddzielnie.")
 
     def _render_feature_interactions(self, df: pd.DataFrame, target_col: Optional[str], fast_mode: bool) -> None:
-        st.write("### Interakcje między cechami")
+        """Analiza interakcji między cechami."""
+        st.write("### 🔗 Interakcje między cechami")
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         if target_col and target_col in numeric_cols:
             numeric_cols.remove(target_col)
@@ -494,50 +1195,228 @@ class AdvancedEDAComponents:
             feature2 = st.selectbox("Cecha 2:", [c for c in numeric_cols if c != feature1], key="feat2")
 
         if feature1 and feature2:
+            # Scatter plot z opcjonalnym kolorem według targetu
             if target_col and target_col in df.columns:
-                fig = px.scatter(df, x=feature1, y=feature2, color=target_col,
-                                 title=f"Interakcja: {feature1} vs {feature2} (kolor: {target_col})")
+                fig = px.scatter(
+                    df, 
+                    x=feature1, 
+                    y=feature2, 
+                    color=target_col,
+                    title=f"Interakcja: {feature1} vs {feature2} (kolor: {target_col})",
+                    opacity=0.6
+                )
             else:
-                fig = px.scatter(df, x=feature1, y=feature2, title=f"Interakcja: {feature1} vs {feature2}")
+                fig = px.scatter(
+                    df, 
+                    x=feature1, 
+                    y=feature2, 
+                    title=f"Interakcja: {feature1} vs {feature2}",
+                    opacity=0.6
+                )
+            
+            # Dodaj linię trendu
+            if len(df) < 10000:  # Tylko dla mniejszych zbiorów
+                fig.add_scatter(
+                    x=df[feature1], 
+                    y=df[feature2], 
+                    mode='lines',
+                    name='Trend',
+                    line=dict(color='red', dash='dash'),
+                    showlegend=False
+                )
+            
             st.plotly_chart(fig, use_container_width=True)
 
-            try:
-                correlation = df[feature1].corr(df[feature2])
-                st.metric("Korelacja między wybranymi cechami", f"{correlation:.3f}")
-            except Exception:
-                st.metric("Korelacja między wybranymi cechami", "N/A")
+            # Statystyki interakcji
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                try:
+                    correlation = df[feature1].corr(df[feature2])
+                    st.metric("Korelacja Pearson", f"{correlation:.4f}")
+                except Exception:
+                    st.metric("Korelacja", "N/A")
+            
+            with col2:
+                try:
+                    spearman_corr = df[feature1].corr(df[feature2], method='spearman')
+                    st.metric("Korelacja Spearman", f"{spearman_corr:.4f}")
+                except Exception:
+                    st.metric("Spearman", "N/A")
+            
+            with col3:
+                # Mutual information (jeśli dostępne)
+                try:
+                    from sklearn.feature_selection import mutual_info_regression
+                    clean_data = df[[feature1, feature2]].dropna()
+                    if len(clean_data) > 10:
+                        mi_score = mutual_info_regression(
+                            clean_data[[feature1]], 
+                            clean_data[feature2],
+                            random_state=42
+                        )[0]
+                        st.metric("Mutual Information", f"{mi_score:.4f}")
+                    else:
+                        st.metric("Mutual Information", "N/A")
+                except:
+                    st.metric("Mutual Information", "N/A")
 
     def _render_outlier_detection(self, df: pd.DataFrame, fast_mode: bool) -> None:
-        st.write("### Detekcja wartości odstających")
+        """Zaawansowana detekcja outliers."""
+        st.write("### ⚠️ Detekcja wartości odstających")
         numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
         if not numeric_cols:
             st.info("Brak kolumn numerycznych do analizy.")
             return
 
+        # Wybór metody detekcji
+        detection_method = st.selectbox(
+            "Metoda detekcji:",
+            ["IQR (Interquartile Range)", "Z-Score", "Modified Z-Score", "Isolation Forest"]
+        )
+
         selected_col = st.selectbox("Wybierz kolumnę do analizy:", numeric_cols)
+        
         if selected_col:
             series = df[selected_col].dropna()
             if len(series) == 0:
                 st.info("Brak danych w wybranej kolumnie.")
                 return
 
-            Q1 = series.quantile(0.25)
-            Q3 = series.quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - 1.5 * IQR
-            upper_bound = Q3 + 1.5 * IQR
-            outliers = series[(series < lower_bound) | (series > upper_bound)]
+            # Wykryj outliers według wybranej metody
+            outliers_mask = self._detect_outliers_by_method(series, detection_method)
+            outliers = series[outliers_mask] if outliers_mask is not None else pd.Series([])
+            
+            # Statystyki outliers
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Liczba outliers", len(outliers))
+            with col2:
+                outlier_pct = (len(outliers) / len(series)) * 100
+                st.metric("% outliers", f"{outlier_pct:.1f}%")
+            with col3:
+                if len(outliers) > 0:
+                    st.metric("Min outlier", f"{outliers.min():.3f}")
 
-            st.metric("Liczba wartości odstających (IQR)", len(outliers))
-            st.metric("% wartości odstających", f"{len(outliers)/len(series)*100:.1f}%")
+            # Wizualizacje
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Box plot z outliers
+                fig_box = go.Figure()
+                fig_box.add_trace(go.Box(
+                    y=series,
+                    name=selected_col,
+                    boxpoints='outliers'
+                ))
+                fig_box.update_layout(
+                    title=f"Box plot z outliers - {selected_col}",
+                    height=400
+                )
+                st.plotly_chart(fig_box, use_container_width=True)
+            
+            with col2:
+                # Histogram z oznaczonymi outliers
+                fig_hist = go.Figure()
+                
+                # Normalne dane
+                normal_data = series[~outliers_mask] if outliers_mask is not None else series
+                fig_hist.add_trace(go.Histogram(
+                    x=normal_data,
+                    name="Normalne dane",
+                    opacity=0.7,
+                    marker_color='blue'
+                ))
+                
+                # Outliers
+                if len(outliers) > 0:
+                    fig_hist.add_trace(go.Histogram(
+                        x=outliers,
+                        name="Outliers",
+                        opacity=0.7,
+                        marker_color='red'
+                    ))
+                
+                fig_hist.update_layout(
+                    title=f"Rozkład z outliers - {selected_col}",
+                    height=400,
+                    barmode='overlay'
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
 
-            fig = px.box(y=series, title=f"Box plot z outlierami - {selected_col}")
-            st.plotly_chart(fig, use_container_width=True)
-
+            # Szczegóły outliers
             if len(outliers) > 0:
-                st.write("#### Próbka wartości odstających:")
-                st.write(outliers.head(10).values)
+                with st.expander("📋 Szczegóły wartości odstających", expanded=False):
+                    outlier_details = pd.DataFrame({
+                        'Index': outliers.index,
+                        'Wartość': outliers.values,
+                        'Z-Score': np.abs((outliers - series.mean()) / series.std()),
+                        'Percentyl': [series.quantile(0.01) <= val <= series.quantile(0.99) for val in outliers.values]
+                    })
+                    st.dataframe(outlier_details.head(20), use_container_width=True, hide_index=True)
+                    
+                    if len(outliers) > 20:
+                        st.info(f"Pokazano pierwsze 20 z {len(outliers)} outliers")
+
+        # Analiza outliers dla wszystkich kolumn
+        st.write("#### 📊 Podsumowanie outliers dla wszystkich kolumn")
+        all_outliers = _detect_outliers_iqr(df)
+        
+        if all_outliers:
+            outlier_summary = pd.DataFrame([
+                {
+                    'Kolumna': col,
+                    'Liczba outliers': len(outliers),
+                    '% outliers': f"{(len(outliers) / len(df[col].dropna())) * 100:.1f}%",
+                    'Min outlier': outliers.min(),
+                    'Max outlier': outliers.max()
+                }
+                for col, outliers in all_outliers.items()
+            ])
+            
+            st.dataframe(outlier_summary, use_container_width=True, hide_index=True)
+        else:
+            st.success("✅ Nie wykryto znaczących outliers w żadnej kolumnie numerycznej")
+
+    def _detect_outliers_by_method(self, series: pd.Series, method: str) -> Optional[pd.Series]:
+        """Wykrywa outliers różnymi metodami."""
+        try:
+            if method == "IQR (Interquartile Range)":
+                Q1 = series.quantile(0.25)
+                Q3 = series.quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - 1.5 * IQR
+                upper_bound = Q3 + 1.5 * IQR
+                return (series < lower_bound) | (series > upper_bound)
+            
+            elif method == "Z-Score":
+                z_scores = np.abs((series - series.mean()) / series.std())
+                return z_scores > 3
+            
+            elif method == "Modified Z-Score":
+                median = series.median()
+                mad = (series - median).abs().median()
+                modified_z_scores = 0.6745 * (series - median) / mad
+                return np.abs(modified_z_scores) > 3.5
+            
+            elif method == "Isolation Forest":
+                try:
+                    from sklearn.ensemble import IsolationForest
+                    iso_forest = IsolationForest(contamination=0.1, random_state=42)
+                    outlier_pred = iso_forest.fit_predict(series.values.reshape(-1, 1))
+                    return pd.Series(outlier_pred == -1, index=series.index)
+                except ImportError:
+                    st.warning("Isolation Forest wymaga sklearn. Używam IQR.")
+                    return self._detect_outliers_by_method(series, "IQR (Interquartile Range)")
+            
+            return None
+            
+        except Exception as e:
+            st.error(f"Błąd podczas detekcji outliers: {e}")
+            return None
+
 
 def render_eda_section(df: pd.DataFrame, target_col: Optional[str] = None) -> None:
+    """Główna funkcja renderująca EDA."""
     eda = AdvancedEDAComponents()
     eda.render_comprehensive_eda(df, target_col)
