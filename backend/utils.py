@@ -530,3 +530,67 @@ def compare_dataframes(df1: pd.DataFrame, df2: pd.DataFrame) -> Dict[str, Any]:
         comparison['removed_columns'] = list(set(df1.columns) - set(df2.columns))
     
     return comparison
+
+
+# ================== COMPATIBILITY FUNCTIONS ==================
+def get_openai_key_from_envs() -> Optional[str]:
+    """
+    Pobiera klucz OpenAI z zmiennych środowiskowych.
+    Kompatybilność z starym kodem.
+    """
+    import os
+    return os.getenv('OPENAI_API_KEY') or os.getenv('OPENAI_KEY')
+
+
+def auto_pick_target(df: pd.DataFrame) -> Optional[str]:
+    """
+    Automatycznie wybiera target z DataFrame.
+    Wrapper dla SmartTargetDetector dla kompatybilności.
+    """
+    try:
+        detector = SmartTargetDetector()
+        candidates = detector.analyze_columns(df)
+        return candidates[0]['column'] if candidates else None
+    except Exception:
+        # Fallback - ostatnia kolumna
+        return df.columns[-1] if len(df.columns) > 0 else None
+
+
+def to_local(dt: Any, timezone: str = "Europe/Warsaw") -> Any:
+    """
+    Konwertuje datetime do lokalnej strefy czasowej.
+    Kompatybilność z starym kodem.
+    """
+    try:
+        from datetime import datetime
+        import pytz
+        
+        if isinstance(dt, str):
+            dt = pd.to_datetime(dt)
+        
+        if hasattr(dt, 'tz_localize') or hasattr(dt, 'tz_convert'):
+            # Pandas Timestamp
+            if dt.tz is None:
+                dt = dt.tz_localize('UTC')
+            return dt.tz_convert(timezone)
+        
+        elif isinstance(dt, datetime):
+            # Python datetime
+            if dt.tzinfo is None:
+                dt = pytz.UTC.localize(dt)
+            local_tz = pytz.timezone(timezone)
+            return dt.astimezone(local_tz)
+        
+        return dt
+        
+    except Exception:
+        return dt
+
+
+def utc_now_iso_z() -> str:
+    """
+    Zwraca aktualny czas UTC w formacie ISO z Z.
+    Kompatybilność z starym kodem.
+    """
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
