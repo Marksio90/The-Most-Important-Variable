@@ -462,12 +462,6 @@ def _render_model_metadata(metadata: Dict[str, Any]) -> None:
                 st.warning(warning)
 
 
-def render_model_registry_section() -> None:
-    """Renderuje sekcję rejestru modeli."""
-    st.subheader("📚 Rejestr modeli")
-    st.info("🚧 Rejestr modeli będzie dostępny w następnej wersji")
-
-
 def render_footer() -> None:
     """Renderuje stopkę aplikacji."""
     st.markdown("---")
