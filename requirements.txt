@@ -1,14 +1,75 @@
-seaborn>=0.11.0
-matplotlib>=3.5.0
-openpyxl>=3.1.0
-streamlit>=1.34
-pandas>=2.1
-numpy>=1.26
-plotly>=5.22
-scikit-learn>=1.3
-python-dotenv>=1.0
-joblib>=1.3
-lightgbm>=4.3; platform_system!="Darwin"  # opcjonalne
-xgboost>=2.0; platform_system!="Darwin"   # opcjonalne
-catboost>=1.2; platform_system!="Darwin"  # opcjonalne
-openai>=1.30     # jeśli chcesz AI target
+# requirements.txt — Wszystkie zależności aplikacji TMIV
+# Core ML & Data Science
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.10.0
+
+# ML Libraries
+xgboost>=2.0.0
+lightgbm>=4.0.0
+catboost>=1.2.0
+
+# Streamlit & UI
+streamlit>=1.28.0
+streamlit-option-menu>=0.3.6
+streamlit-aggrid>=0.3.4
+
+# Visualization
+plotly>=5.15.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+kaleido>=0.2.1
+
+# OpenAI & LLM
+openai>=1.3.0
+tiktoken>=0.5.0
+
+# Database & Storage
+sqlite3  # Built-in Python
+sqlalchemy>=2.0.0
+
+# Data Processing
+openpyxl>=3.1.0  # Excel support
+xlrd>=2.0.0      # Excel support
+chardet>=5.2.0   # Character encoding detection
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.4.0
+python-dateutil>=2.8.0
+pytz>=2023.3
+hashlib  # Built-in Python
+pathlib  # Built-in Python
+typing-extensions>=4.7.0
+
+# File Processing
+joblib>=1.3.0    # Model serialization
+pickle5>=0.0.11  # Enhanced pickle for Python < 3.8
+
+# Development & Testing (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.7.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# Performance (optional)
+numba>=0.58.0
+pandas-profiling>=3.6.0
+
+# Additional utilities
+requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2023.7.22
+
+# Image processing (for chart exports)
+Pillow>=10.0.0
+
+# Memory profiling (optional)
+memory-profiler>=0.61.0
+psutil>=5.9.0
+
+# Progress bars & UI enhancements
+tqdm>=4.66.0
+rich>=13.5.0
