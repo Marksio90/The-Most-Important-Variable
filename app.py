@@ -24,7 +24,7 @@ from backend.smart_target_llm import (
 )
 from backend.ml_integration import (
     ModelConfig, train_model_comprehensive, save_model_artifacts, 
-    load_model_artifacts, TrainingResult, get_model_recommendations
+    load_model_artifacts, TrainingResult
 )
 from backend.utils import (
     infer_problem_type, validate_dataframe, seed_everything,
