@@ -473,12 +473,12 @@ def render_footer() -> None:
         st.markdown("AutoML Platform")
     
     with col2:
-        st.markdown("**🔗 Linki**")
-        st.markdown("[GitHub](https://github.com/your-repo) | [Docs](https://docs.example.com)")
+        st.markdown("**📈 Funkcje**")
+        st.markdown("Smart Target • EDA • ML • Historia")
     
     with col3:
         st.markdown("**📊 Status**")
-        st.markdown("🟢 Online | ✅ Stabilny")
+        st.markdown("🟢 Online | ✅ Gotowy")
 
 
 # Funkcje pomocnicze
