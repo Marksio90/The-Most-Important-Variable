@@ -8,6 +8,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from pandas.api.types import is_datetime64_any_dtype  # <-- ważne dla bezpiecznego describe()
 
 
 # -----------------------------
@@ -44,14 +45,15 @@ def _describe_df(df: pd.DataFrame) -> pd.DataFrame:
                 if is_datetime64_any_dtype(s):
                     # Konwersja do UTC i ns
                     s2 = pd.to_datetime(s, errors="coerce", utc=True)
+                    # view("int64") może dawać iNaT dla NaT; rzutujemy na float i zamieniamy iNaT->NaN
                     arr = s2.view("int64").astype("float64")
-                    # Zamień wartości iNaT na NaN, by nie psuły statystyk
                     arr[arr == np.iinfo("int64").min] = np.nan
                     df2[c] = arr
             except Exception:
                 # W razie wątpliwości zostaw kolumnę bez zmian
                 pass
         return df2.describe(include="all")
+
 
 @st.cache_data(show_spinner=False)
 def _value_counts_head(s: pd.Series, top: int = TOP_CATEG_LEVELS) -> pd.DataFrame:
@@ -60,6 +62,7 @@ def _value_counts_head(s: pd.Series, top: int = TOP_CATEG_LEVELS) -> pd.DataFram
     if len(vc) > top:
         vc = vc.head(top)
     return vc.to_frame("count").reset_index().rename(columns={"index": "value"})
+
 
 @st.cache_data(show_spinner=False)
 def _corr_matrix(numeric_df: pd.DataFrame) -> pd.DataFrame:
@@ -72,6 +75,7 @@ def _corr_matrix(numeric_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     return safe_df.corr()
 
+
 def _maybe_sample(df: pd.DataFrame, fast_mode: bool, limit: int = FAST_LIMIT_ROWS) -> pd.DataFrame:
     """Jeśli fast_mode aktywny, próbkowanie wierszy dla płynności."""
     if not fast_mode:
@@ -80,6 +84,7 @@ def _maybe_sample(df: pd.DataFrame, fast_mode: bool, limit: int = FAST_LIMIT_ROW
         return df.sample(limit, random_state=42)
     return df
 
+
 def _safe_mode(series: pd.Series) -> str:
     """Zwraca najczęstszą wartość lub 'N/A' bez wyjątków."""
     try:
@@ -87,6 +92,7 @@ def _safe_mode(series: pd.Series) -> str:
         return str(m.iloc[0]) if len(m) > 0 else "N/A"
     except Exception:
         return "N/A"
+
 
 def _first_non_null(series: pd.Series) -> str:
     """Zwraca pierwszy niepusty przykład lub 'N/A'."""
@@ -289,7 +295,10 @@ class AdvancedEDAComponents:
 
                     # Statystyki opisowe
                     st.write("#### Statystyki opisowe")
-                    desc_stats = _describe_df(df[selected_numeric])[selected_numeric]
+                    try:
+                        desc_stats = _describe_df(df[selected_numeric])[selected_numeric]
+                    except Exception:
+                        desc_stats = _describe_df(df[selected_numeric])
                     st.dataframe(desc_stats, use_container_width=True)
             else:
                 st.info("Brak kolumn numerycznych do analizy.")
@@ -302,34 +311,40 @@ class AdvancedEDAComponents:
                 )
 
                 if selected_categorical:
-                    vc_df = _value_counts_head(df[selected_categorical], TOP_CATEG_LEVELS)
-                    value_counts = vc_df.set_index("value")["count"]
+                    # Bezpieczne value_counts: obsługa NaN, None, mieszanych typów i bardzo długich etykiet
+                    s = df[selected_categorical]
+                    s_display = s.fillna("(NaN)").astype(str)
 
+                    # top-N, ale z możliwością rozszerzenia
+                    top_n = st.slider("Ile najczęstszych kategorii pokazać", 5, 50, 20)
+                    vc = s_display.value_counts(dropna=False).head(top_n).reset_index()
+                    # Gwarantowane nazwy kolumn:
+                    vc.columns = ["label", "count"]
+
+                    # wykres (poziomy bar) – odporny na egzotyczne etykiety
                     fig = px.bar(
-                        x=value_counts.values,
-                        y=value_counts.index,
-                        orientation='h',
+                        vc,
+                        x="count",
+                        y="label",
+                        orientation="h",
                         title=f"Rozkład: {selected_categorical}",
-                        color=value_counts.values,
-                        color_continuous_scale='viridis'
                     )
-
                     fig.update_layout(
                         yaxis_title=selected_categorical,
                         xaxis_title="Liczba wystąpień",
-                        height=max(400, len(value_counts) * 25)
+                        height=max(400, len(vc) * 25),
+                        margin=dict(l=10, r=10, t=60, b=10),
                     )
-
                     st.plotly_chart(fig, use_container_width=True)
 
-                    # Statystyki kategorii
+                    # metryki dla wybranej kolumny
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Unikalne kategorie", int(df[selected_categorical].nunique()))
-                        st.metric("Najczęstsza", _safe_mode(df[selected_categorical]))
+                        st.metric("Unikalne kategorie", int(s.nunique(dropna=True)))
+                        st.metric("Najczęstsza", str(vc.iloc[0]["label"]) if len(vc) else "—")
                     with col2:
-                        st.metric("Częstość najczęstszej", f"{int(value_counts.iloc[0]):,}" if len(value_counts) else "0")
-                        missing_pct = df[selected_categorical].isna().mean() * 100
+                        st.metric("Częstość najczęstszej", f"{int(vc.iloc[0]['count']):,}" if len(vc) else "—")
+                        missing_pct = s.isna().mean() * 100
                         st.metric("Braki", f"{missing_pct:.1f}%")
             else:
                 st.info("Brak kolumn kategorycznych do analizy.")
@@ -383,16 +398,18 @@ class AdvancedEDAComponents:
             target_corrs = target_corrs.abs().sort_values(ascending=False)
 
             top_show = min(30, len(target_corrs))
-            fig_bar = px.bar(
-                x=target_corrs.values[:top_show],
-                y=target_corrs.index[:top_show],
-                orientation='h',
-                title=f"Korelacje z {target_col} (top {top_show})",
-                color=target_corrs.values[:top_show],
-                color_continuous_scale='viridis'
-            )
-
-            st.plotly_chart(fig_bar, use_container_width=True)
+            if top_show > 0:
+                fig_bar = px.bar(
+                    x=target_corrs.values[:top_show],
+                    y=target_corrs.index[:top_show],
+                    orientation='h',
+                    title=f"Korelacje z {target_col} (top {top_show})",
+                    color=target_corrs.values[:top_show],
+                    color_continuous_scale='viridis'
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.info("Brak istotnych korelacji z targetem.")
 
         # Tabela najsilniejszych korelacji (wszystkie pary – limitowana)
         st.write("#### Najsilniejsze korelacje (sparowane)")
@@ -459,15 +476,16 @@ class AdvancedEDAComponents:
 
             # Wykres rozkładu (przycięty do TOP_CATEG_LEVELS)
             vc_df = _value_counts_head(df[selected_cat], TOP_CATEG_LEVELS)
-            value_counts = vc_df.set_index("value")["count"]
-
-            fig = px.pie(
-                values=value_counts.values,
-                names=value_counts.index,
-                title=f"Rozkład kategorii: {selected_cat}"
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
+            if vc_df.empty:
+                st.info("Brak danych do wizualizacji rozkładu kategorii.")
+            else:
+                value_counts = vc_df.set_index("value")["count"]
+                fig = px.pie(
+                    values=value_counts.values,
+                    names=value_counts.index,
+                    title=f"Rozkład kategorii: {selected_cat}"
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
             # Analiza względem targetu (jeśli target istnieje)
             if target_col and target_col in df.columns:
@@ -489,22 +507,25 @@ class AdvancedEDAComponents:
                     keep_rows = df[selected_cat].value_counts().index[:TOP_CATEG_LEVELS]
                     crosstab = crosstab.loc[crosstab.index.intersection(keep_rows)]
 
-                fig_stack = go.Figure()
-                for col in crosstab.columns:
-                    fig_stack.add_trace(go.Bar(
-                        name=str(col),
-                        x=crosstab.index.astype(str),
-                        y=crosstab[col],
-                    ))
+                if crosstab.empty:
+                    st.info("Brak danych do wykresu rozkładu względem targetu.")
+                else:
+                    fig_stack = go.Figure()
+                    for col in crosstab.columns:
+                        fig_stack.add_trace(go.Bar(
+                            name=str(col),
+                            x=crosstab.index.astype(str),
+                            y=crosstab[col],
+                        ))
 
-                fig_stack.update_layout(
-                    barmode='stack',
-                    title=f"Rozkład {target_col} w grupach {selected_cat}",
-                    yaxis_title="Procent",
-                    xaxis_title=selected_cat
-                )
+                    fig_stack.update_layout(
+                        barmode='stack',
+                        title=f"Rozkład {target_col} w grupach {selected_cat}",
+                        yaxis_title="Procent",
+                        xaxis_title=selected_cat
+                    )
 
-                st.plotly_chart(fig_stack, use_container_width=True)
+                    st.plotly_chart(fig_stack, use_container_width=True)
 
     def _render_target_analysis(self, df: pd.DataFrame, target_col: str) -> None:
         """Renderuje szczegółową analizę targetu."""
@@ -532,19 +553,25 @@ class AdvancedEDAComponents:
     def _render_numeric_target_analysis(self, target_series: pd.Series) -> None:
         """Analiza numerycznego targetu."""
         # Histogram
-        fig = px.histogram(
-            target_series.dropna(),
-            title=f"Rozkład {target_series.name}",
-            nbins=50
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        if target_series.dropna().empty:
+            st.info("Brak danych do wykresu histogramu.")
+        else:
+            fig = px.histogram(
+                target_series.dropna(),
+                title=f"Rozkład {target_series.name}",
+                nbins=50
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         # Box plot
-        fig_box = px.box(
-            y=target_series.dropna(),
-            title=f"Box plot - {target_series.name}"
-        )
-        st.plotly_chart(fig_box, use_container_width=True)
+        if target_series.dropna().empty:
+            st.info("Brak danych do wykresu pudełkowego.")
+        else:
+            fig_box = px.box(
+                y=target_series.dropna(),
+                title=f"Box plot - {target_series.name}"
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
 
         # Statystyki
         stats = target_series.describe()
@@ -553,6 +580,10 @@ class AdvancedEDAComponents:
     def _render_categorical_target_analysis(self, target_series: pd.Series) -> None:
         """Analiza kategorycznego targetu."""
         value_counts = target_series.value_counts()
+
+        if value_counts.empty:
+            st.info("Brak danych do analizy rozkładu klas.")
+            return
 
         # Bar chart
         fig = px.bar(
