@@ -123,7 +123,13 @@ def render_data_preview(df: pd.DataFrame) -> None:
     preview_tab1, preview_tab2, preview_tab3 = st.tabs(["📋 Pierwsze wiersze", "ℹ️ Info", "📊 Statystyki"])
     
     with preview_tab1:
-        n_rows = st.slider("Liczba wierszy do podglądu:", 5, min(50, len(df)), 10)
+        n_rows = st.slider(
+            "Liczba wierszy do podglądu:", 
+            min_value=5, 
+            max_value=min(50, len(df)), 
+            value=10,
+            key="data_preview_slider"  
+        )
         st.dataframe(df.head(n_rows), use_container_width=True)
     
     with preview_tab2:
