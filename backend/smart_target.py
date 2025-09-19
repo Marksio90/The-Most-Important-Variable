@@ -8,9 +8,7 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
-from backend.smart_target import SmartTargetSelector, TargetRecommendation
 from backend.utils import get_openai_key_from_envs
-
 
 @dataclass
 class LLMTargetAnalysis:
