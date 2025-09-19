@@ -1,4 +1,4 @@
-# settings.py — centralna konfiguracja TMIV (DEV/PROD, flagi, limity, silniki)
+# settings.py — centralna konfiguracja TMIV (NAPRAWIONA: lepsze ładowanie .env, debug info)
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -36,7 +36,7 @@ except Exception:
 
 # optional: dotenv (lokalne .env podczas dev)
 try:
-    from dotenv import load_dotenv  # type: ignore
+    from dotenv import load_dotenv, find_dotenv  # type: ignore
     HAS_DOTENV = True
 except Exception:
     HAS_DOTENV = False
@@ -128,6 +128,13 @@ class _DataclassSettings:
     # LLM / klucze (tylko flaga; realny klucz pobieramy w utils.get_openai_key_from_envs)
     llm_enabled_by_default: bool = False
 
+    # Nowe ustawienia UI
+    default_color_theme: str = "default"
+    default_detail_level: str = "intermediate"
+    default_chart_height: int = 500
+    show_grid: bool = True
+    interactive_charts: bool = True
+
     # Wyliczenia pomocnicze (uzupełniane po inicjalizacji)
     is_prod: bool = False
     is_dev: bool = True
@@ -175,6 +182,13 @@ if HAS_PYDANTIC:
             # LLM
             llm_enabled_by_default: bool = False
 
+            # Nowe ustawienia UI
+            default_color_theme: str = "default"
+            default_detail_level: str = "intermediate"
+            default_chart_height: int = 500
+            show_grid: bool = True
+            interactive_charts: bool = True
+
             # pomocnicze (ustawiane po utworzeniu)
             is_prod: bool = False
             is_dev: bool = True
@@ -220,6 +234,13 @@ if HAS_PYDANTIC:
             # LLM
             llm_enabled_by_default: bool = False
 
+            # Nowe ustawienia UI
+            default_color_theme: str = "default"
+            default_detail_level: str = "intermediate"
+            default_chart_height: int = 500
+            show_grid: bool = True
+            interactive_charts: bool = True
+
             # pomocnicze (ustawiane po utworzeniu)
             is_prod: bool = False
             is_dev: bool = True
@@ -233,17 +254,40 @@ else:
 
 
 # ==========================
-#  Wczytanie .env / secrets
+#  Wczytanie .env / secrets - NAPRAWIONE
 # ==========================
 def _load_env_chain() -> None:
     """
-    Porządek:
-      1) .env przez dotenv (DEV)
-      2) os.environ (PROD)
-    Pydantic (jeśli jest) i tak wczyta ENV automatycznie; ta funkcja w DEV dogrywa .env do os.environ.
+    NAPRAWIONA wersja: Próbuje znaleźć .env w bieżącym katalogu i katalogach nadrzędnych.
+    Następnie ładuje zmienne do os.environ.
     """
-    if HAS_DOTENV:
-        load_dotenv(override=False)
+    if not HAS_DOTENV:
+        return
+        
+    try:
+        # Znajdź .env file (w bieżącym katalogu lub wyżej)
+        env_file = find_dotenv()
+        if env_file:
+            print(f"[SETTINGS] Znaleziono .env: {env_file}")
+            load_dotenv(env_file, override=False)
+            
+            # Debug: sprawdź czy klucz został wczytany
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key and openai_key.startswith("sk-"):
+                print(f"[SETTINGS] ✅ Wczytano klucz OpenAI z .env")
+            else:
+                print(f"[SETTINGS] ⚠️ Brak prawidłowego klucza OpenAI w .env")
+        else:
+            print(f"[SETTINGS] Nie znaleziono pliku .env")
+            
+        # Próbuj też z konkretną ścieżką
+        local_env = Path(".env")
+        if local_env.exists():
+            load_dotenv(local_env, override=False)
+            print(f"[SETTINGS] Wczytano .env z {local_env.absolute()}")
+            
+    except Exception as e:
+        print(f"[SETTINGS] Błąd wczytywania .env: {e}")
 
 
 def _has_streamlit_secrets() -> bool:
@@ -342,11 +386,12 @@ def _normalize_after_load(s: Settings) -> Settings:
 def get_settings() -> Settings:
     """
     Singleton konfiguracyjny.
-    - ładuje .env (jeśli dotenv),
+    - ładuje .env (jeśli dotenv) - NAPRAWIONE
     - tworzy Settings (Pydantic albo dataclass),
     - delikatnie nadpisuje z st.secrets (gdy Streamlit),
     - normalizuje typy i listy niezależnie od backendu.
     """
+    print("[SETTINGS] Inicjalizacja konfiguracji...")
     _load_env_chain()
 
     if HAS_PYDANTIC:
@@ -396,7 +441,14 @@ def get_settings() -> Settings:
         except Exception:
             pass
 
+    print(f"[SETTINGS] ✅ Konfiguracja gotowa (debug: {getattr(s, 'debug', False)})")
     return s
+
+
+def clear_settings_cache():
+    """Czyści cache ustawień - przydatne po zmianie konfiguracji."""
+    get_settings.cache_clear()
+    print("[SETTINGS] Cache ustawień wyczyszczony")
 
 
 # ==========================
@@ -433,7 +485,10 @@ def as_dict(settings: Optional[Settings] = None) -> Dict[str, Any]:
         "enable_shap": s.enable_shap,
         "is_prod": getattr(s, "is_prod", False),
         "is_dev": getattr(s, "is_dev", True),
+        "default_color_theme": getattr(s, "default_color_theme", "default"),
+        "default_detail_level": getattr(s, "default_detail_level", "intermediate"),
+        "default_chart_height": getattr(s, "default_chart_height", 500),
     }
 
 
-__all__ = ["get_settings", "Settings", "MLEngine", "engines_enabled", "as_dict"]
+__all__ = ["get_settings", "Settings", "MLEngine", "engines_enabled", "as_dict", "clear_settings_cache"]
