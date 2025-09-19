@@ -1,4 +1,4 @@
-# app.py — NAPRAWIONY: kompatybilny z naszymi paczkami 1-6
+# app.py — TMIV (naprawiony, spójne ścieżki z settings, bez duplikatów sekcji)
 from __future__ import annotations
 
 import time
@@ -14,8 +14,8 @@ import streamlit as st
 import plotly.express as px
 import plotly.figure_factory as ff
 
-# ====== NASZE MODUŁY (z paczek 1-9) ======
-from config.settings import get_settings
+# ====== MODUŁY PROJEKTU ======
+from config.settings import get_settings  # musi zwracać m.in. output_dir, models_dir, history_db_path
 from frontend.ui_components import (
     render_upload_section, render_data_preview, render_model_config_section,
     render_training_results, render_sidebar, render_footer
@@ -23,11 +23,11 @@ from frontend.ui_components import (
 from frontend.advanced_eda import render_eda_section
 from backend.smart_target import SmartTargetSelector, format_target_explanation
 from backend.smart_target_llm import (
-    LLMTargetSelector, render_openai_config, 
+    LLMTargetSelector, render_openai_config,
     render_smart_target_section_with_llm
 )
 from backend.ml_integration import (
-    ModelConfig, train_model_comprehensive, save_model_artifacts, 
+    ModelConfig, train_model_comprehensive, save_model_artifacts,
     load_model_artifacts, TrainingResult
 )
 from backend.utils import (
@@ -66,31 +66,31 @@ def reset_app_state():
         del st.session_state.tmiv_app_state
 
 
-# ================== POMOCNICZE FUNKCJE WYKRESÓW ==================
+# ================== POMOCNICZE WYKRESY ==================
 def plot_regression_results(y_true, y_pred, title="Predykcje vs Rzeczywistość"):
     """Renderuje scatter plot dla regresji."""
     if y_true is None or y_pred is None or len(y_true) == 0:
         st.info("Brak danych do wizualizacji regresji")
         return
-    
+
     try:
         df_plot = pd.DataFrame({
-            "y_true": np.array(y_true).flatten(), 
+            "y_true": np.array(y_true).flatten(),
             "y_pred": np.array(y_pred).flatten()
         })
-        
+
         fig = px.scatter(
-            df_plot, 
-            x="y_true", 
-            y="y_pred", 
+            df_plot,
+            x="y_true",
+            y="y_pred",
             title=title,
             labels={"y_true": "Wartości rzeczywiste", "y_pred": "Predykcje"}
         )
-        
+
         # Linia idealna
-        min_val = min(df_plot["y_true"].min(), df_plot["y_pred"].min())
-        max_val = max(df_plot["y_true"].max(), df_plot["y_pred"].max())
-        
+        min_val = float(min(df_plot["y_true"].min(), df_plot["y_pred"].min()))
+        max_val = float(max(df_plot["y_true"].max(), df_plot["y_pred"].max()))
+
         fig.add_shape(
             type="line",
             x0=min_val, y0=min_val,
@@ -98,10 +98,10 @@ def plot_regression_results(y_true, y_pred, title="Predykcje vs Rzeczywistość"
             line=dict(color="red", dash="dash"),
             name="Idealna predykcja"
         )
-        
+
         fig.update_layout(height=500)
         st.plotly_chart(fig, use_container_width=True)
-        
+
     except Exception as e:
         st.error(f"Błąd renderowania wykresu regresji: {str(e)}")
 
@@ -111,31 +111,34 @@ def plot_confusion_matrix(y_true, y_pred, title="Macierz pomyłek"):
     if y_true is None or y_pred is None or len(y_true) == 0:
         st.info("Brak danych do wizualizacji klasyfikacji")
         return
-    
+
     try:
         from sklearn.metrics import confusion_matrix
-        
+
         labels = sorted(list(set(y_true) | set(y_pred)))
         cm = confusion_matrix(y_true, y_pred, labels=labels)
-        
+
+        # annotation_text musi być listą list stringów
+        ann = [[str(v) for v in row] for row in cm.tolist()]
+
         fig = ff.create_annotated_heatmap(
             z=cm,
             x=[str(label) for label in labels],
             y=[str(label) for label in labels],
-            annotation_text=cm,
+            annotation_text=ann,
             showscale=True,
             colorscale='Blues'
         )
-        
+
         fig.update_layout(
             title=title,
             xaxis_title="Predykcje",
             yaxis_title="Wartości rzeczywiste",
             height=500
         )
-        
+
         st.plotly_chart(fig, use_container_width=True)
-        
+
     except Exception as e:
         st.error(f"Błąd renderowania macierzy pomyłek: {str(e)}")
 
@@ -145,14 +148,14 @@ def show_metrics_dashboard(result: TrainingResult):
     if not result or not result.metrics:
         st.info("Brak metryk do wyświetlenia")
         return
-    
+
     st.subheader("📈 Metryki modelu")
-    
+
     # Główne metryki w kolumnach
     metrics_items = list(result.metrics.items())
     if metrics_items:
         cols = st.columns(min(4, len(metrics_items)))
-        
+
         for i, (metric_name, metric_value) in enumerate(metrics_items[:4]):
             with cols[i]:
                 try:
@@ -163,21 +166,21 @@ def show_metrics_dashboard(result: TrainingResult):
                         st.metric(metric_name, str(metric_value))
                 except Exception:
                     st.metric(metric_name, "N/A")
-    
+
     # Ostrzeżenia z metadanych
     if result.metadata and result.metadata.get("warnings"):
         st.subheader("⚠️ Ostrzeżenia")
         for warning in result.metadata["warnings"]:
             st.warning(warning)
-    
+
     # Szczegóły w expander
     with st.expander("🔍 Szczegółowe metryki i metadane"):
         col1, col2 = st.columns(2)
-        
+
         with col1:
             st.write("**Metryki:**")
             st.json(result.metrics)
-        
+
         with col2:
             st.write("**Metadane:**")
             st.json(result.metadata or {})
@@ -195,113 +198,120 @@ def list_saved_models(models_dir: Path, dataset_name: str, target: str) -> List[
     """Listuje zapisane modele dla danego dataset/target."""
     if not models_dir.exists():
         return []
-    
+
     safe_dataset = dataset_name.replace("/", "_").replace("\\", "_")
     safe_target = target.replace("/", "_").replace("\\", "_")
     pattern = f"{safe_dataset}__{safe_target}__"
-    
+
     return sorted([
-        p for p in models_dir.iterdir() 
+        p for p in models_dir.iterdir()
         if p.is_dir() and p.name.startswith(pattern)
     ], reverse=True)
 
 
 def render_model_registry(state: AppState, models_dir: Path):
-    """Renderuje sekcję rejestru modeli."""
+    """Renderuje sekcję rejestru modeli (zakładka 💾 Modele)."""
     st.header("💾 Rejestr modeli")
-    
+
     if not state.target_column or not state.dataset_name:
-        st.info("Wybierz dataset i target aby zarządzać modelami")
+        st.info("Wybierz dataset i target aby zarządzać modelami.")
         return
-    
+
     col1, col2 = st.columns(2)
-    
+
     # Eksport modelu
     with col1:
         st.subheader("📤 Eksport modelu")
-        
-        can_export = (state.training_completed and 
-                     state.training_result and 
-                     state.training_result.model is not None)
-        
+
+        can_export = (
+            state.training_completed and
+            state.training_result and
+            getattr(state.training_result, "model", None) is not None
+        )
+
         if st.button("💾 Zapisz model", disabled=not can_export, use_container_width=True):
             if can_export:
                 try:
                     # Generuj run_id
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     run_id = f"run_{timestamp}"
-                    
+
                     model_path = get_model_path(
-                        models_dir, 
-                        state.dataset_name, 
-                        state.target_column, 
+                        models_dir,
+                        state.dataset_name,
+                        state.target_column,
                         run_id
                     )
-                    
+
                     save_model_artifacts(
-                        model_path, 
-                        state.training_result.model, 
+                        model_path,
+                        state.training_result.model,
                         state.training_result.metadata or {}
                     )
-                    
+
                     state.last_run_id = run_id
                     st.success(f"✅ Model zapisany: {model_path.name}")
-                    
+
                 except Exception as e:
                     st.error(f"❌ Błąd zapisu modelu: {str(e)}")
             else:
-                st.warning("Najpierw wytrenuj model")
-    
+                st.warning("Najpierw wytrenuj model.")
+
     # Import/wczytywanie modeli
     with col2:
         st.subheader("📥 Wczytywanie modeli")
-        
+
         saved_models = list_saved_models(models_dir, state.dataset_name, state.target_column)
-        
+
         if not saved_models:
-            st.info("Brak zapisanych modeli dla tego dataset/target")
+            st.info("Brak zapisanych modeli dla tego dataset/target.")
         else:
             selected_model = st.selectbox(
                 "Wybierz model:",
                 options=[p.name for p in saved_models],
                 help="Lista zapisanych modeli"
             )
-            
+
             col_load, col_predict = st.columns(2)
-            
+
             with col_load:
                 if st.button("📂 Wczytaj model", use_container_width=True):
                     try:
                         model_path = models_dir / selected_model
                         model, metadata = load_model_artifacts(model_path)
-                        
+
                         st.success("✅ Model wczytany!")
-                        st.json(metadata)
-                        
+                        with st.expander("Metadane modelu", expanded=False):
+                            st.json(metadata)
+
                     except Exception as e:
                         st.error(f"❌ Błąd wczytywania: {str(e)}")
-            
+
             with col_predict:
                 if st.button("🔮 Predykcje", use_container_width=True):
                     try:
                         model_path = models_dir / selected_model
                         model, metadata = load_model_artifacts(model_path)
-                        
+
                         # Przygotuj dane do predykcji
+                        if state.dataset is None:
+                            st.info("Wczytaj dane, aby wykonać predykcje.")
+                            return
+
                         if state.target_column in state.dataset.columns:
                             X = state.dataset.drop(columns=[state.target_column])
                         else:
                             X = state.dataset
-                        
+
                         predictions = model.predict(X)
-                        
+
                         # Pokaż wyniki
                         result_df = state.dataset.copy()
                         result_df["prediction"] = predictions
-                        
+
                         st.write("**Przykładowe predykcje:**")
                         st.dataframe(result_df.head(10), use_container_width=True)
-                        
+
                         # Download
                         csv_data = result_df.to_csv(index=False).encode('utf-8')
                         st.download_button(
@@ -310,44 +320,44 @@ def render_model_registry(state: AppState, models_dir: Path):
                             file_name=f"predictions_{state.dataset_name}_{state.target_column}.csv",
                             mime="text/csv"
                         )
-                        
+
                     except Exception as e:
                         st.error(f"❌ Błąd predykcji: {str(e)}")
 
 
 # ================== HISTORIA URUCHOMIEŃ ==================
 def render_training_history(db_manager: DatabaseManager):
-    """Renderuje historię treningów."""
+    """Renderuje historię treningów (zakładka 📚 Historia)."""
     st.header("📚 Historia treningów")
-    
+
     try:
         history = get_training_history(db_manager, limit=50)
-        
+
         if not history:
             st.info("Brak historii treningów. Wytrenuj pierwszy model.")
             return
-        
+
         # Statystyki
         col1, col2, col3, col4 = st.columns(4)
-        
+
         with col1:
             st.metric("Łącznie uruchomień", len(history))
-        
+
         with col2:
             unique_datasets = len(set(record.dataset_name for record in history))
             st.metric("Różnych datasetów", unique_datasets)
-        
+
         with col3:
             unique_targets = len(set(record.target_column for record in history))
             st.metric("Różnych targetów", unique_targets)
-        
+
         with col4:
             completed = sum(1 for record in history if record.status == "completed")
             st.metric("Zakończone", completed)
-        
+
         # Tabela historii
         st.subheader("📋 Lista uruchomień")
-        
+
         history_data = []
         for record in history:
             history_data.append({
@@ -358,11 +368,11 @@ def render_training_history(db_manager: DatabaseManager):
                 "Status": record.status,
                 "Data": record.created_at.strftime("%Y-%m-%d %H:%M") if record.created_at else "N/A"
             })
-        
+
         if history_data:
             history_df = pd.DataFrame(history_data)
             st.dataframe(history_df, use_container_width=True, hide_index=True)
-        
+
     except Exception as e:
         st.error(f"Błąd wczytywania historii: {str(e)}")
 
@@ -370,97 +380,96 @@ def render_training_history(db_manager: DatabaseManager):
 # ================== GŁÓWNA APLIKACJA ==================
 def main():
     """Główna funkcja aplikacji TMIV."""
-    
-    # Konfiguracja strony
     st.set_page_config(
         page_title="TMIV - The Most Important Variables",
         page_icon="🎯",
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    
+
     try:
         # Inicjalizacja
         settings = get_settings()
         state = get_app_state()
-        
-        # Przygotuj katalogi
-        output_dir = Path("./tmiv_output")
-        output_dir.mkdir(exist_ok=True)
-        
-        models_dir = output_dir / "models"
-        models_dir.mkdir(exist_ok=True)
-        
-        # Database manager
-        db_manager = DatabaseManager(str(output_dir / "tmiv_history.db"))
-        
-        # Smart target selector
+        seed_everything(42)
+
+        # Przygotuj katalogi wg settings
+        output_dir = Path(getattr(settings, "output_dir", "./tmiv_output"))
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        models_dir = Path(getattr(settings, "models_dir", output_dir / "models"))
+        models_dir.mkdir(parents=True, exist_ok=True)
+
+        history_db_path = Path(getattr(settings, "history_db_path", output_dir / "tmiv_history.db"))
+        db_manager = DatabaseManager(str(history_db_path))
+
+        # Smart target selector (klasyczny; LLM używamy w UI w tabie Target)
         smart_target = SmartTargetSelector()
-        
+
         # Header
         st.title("🎯 TMIV - The Most Important Variables")
         st.markdown("**Zaawansowana platforma AutoML z inteligentnym wyborem targetu**")
-        
+
         # Sidebar
         with st.sidebar:
             render_sidebar()
-            
-            # NOWE: Konfiguracja OpenAI
+
+            # Konfiguracja OpenAI (pobieranie z .env/st.secrets lub ręczny input)
             render_openai_config()
-            
+
             if state.dataset is not None:
                 st.divider()
                 st.metric("Wiersze", f"{len(state.dataset):,}")
                 st.metric("Kolumny", f"{len(state.dataset.columns):,}")
-                
+
                 if st.button("🗑️ Wyczyść dane", type="secondary"):
                     reset_app_state()
                     st.rerun()
-        
-        # Główna zawartość w tabsach
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📁 Dane", 
-            "🎯 Target", 
-            "📊 EDA", 
-            "🤖 Trening", 
-            "📈 Wyniki"
+
+        # Główne zakładki (dodane „Modele” i „Historia”)
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+            "📁 Dane",
+            "🎯 Target",
+            "📊 EDA",
+            "🤖 Trening",
+            "📈 Wyniki",
+            "💾 Modele",
+            "📚 Historia"
         ])
-        
+
         # TAB 1: Wczytywanie danych
         with tab1:
             st.header("📁 Wczytywanie danych")
-            
-            # Opcje wczytywania
+
             data_source = st.radio(
                 "Wybierz źródło danych:",
                 ["📁 Upload pliku", "🥑 Demo: Avocado", "🌸 Demo: Iris", "📊 Demo: Wine"],
                 horizontal=True
             )
-            
+
             df = None
             dataset_name = ""
-            
+
             if data_source == "📁 Upload pliku":
                 uploaded_file = st.file_uploader(
                     "Wybierz plik danych",
                     type=['csv', 'xlsx', 'xls'],
                     help="Obsługiwane formaty: CSV, Excel"
                 )
-                
+
                 if uploaded_file is not None:
                     try:
                         with st.spinner("Wczytywanie danych..."):
-                            # Wczytaj dane
-                            if uploaded_file.name.endswith('.csv'):
+                            if uploaded_file.name.lower().endswith('.csv'):
                                 df = pd.read_csv(uploaded_file)
                             else:
                                 df = pd.read_excel(uploaded_file)
-                            
-                            dataset_name = uploaded_file.name.split('.')[0]
-                    
+
+                            dataset_name = uploaded_file.name.rsplit('.', 1)[0]
+
                     except Exception as e:
                         st.error(f"❌ Błąd wczytywania: {str(e)}")
-            
+
             elif data_source == "🥑 Demo: Avocado":
                 if st.button("📥 Wczytaj Avocado Dataset", type="primary"):
                     try:
@@ -468,32 +477,26 @@ def main():
                             avocado_path = Path("data/avocado.csv")
                             if avocado_path.exists():
                                 df = pd.read_csv(avocado_path)
-                                # Czyść dane
                                 if 'Unnamed: 0' in df.columns:
                                     df = df.drop('Unnamed: 0', axis=1)
                                 dataset_name = "avocado"
                                 st.success("✅ Demo dataset Avocado wczytany!")
-                                st.info("🎯 **Idealny dla regresji** - przewidywanie cen avocado na podstawie wolumenu, regionu, typu")
+                                st.info("🎯 **Typ problemu**: Regresja — przewidywanie ceny `AveragePrice`.")
                             else:
                                 st.error("❌ Nie znaleziono data/avocado.csv")
                                 st.info("💡 Umieść plik avocado.csv w folderze data/")
                     except Exception as e:
                         st.error(f"❌ Błąd: {str(e)}")
-                
-                # Info o datasecie
-                if not df is not None:
+
+                if df is None:
                     with st.expander("ℹ️ O datasecie Avocado"):
-                        st.write("""
-                        **Avocado Prices Dataset**
-                        - 📊 18,249 wierszy × 13 kolumn
-                        - 🎯 Target: `AveragePrice` (średnia cena avocado w USD)
-                        - 📅 Okres: 2015-2018
-                        - 🗺️ Dane z różnych regionów USA
-                        - 🥑 Typy: conventional vs organic
-                        - 📈 **Typ problemu**: Regresja
-                        - 🏆 **Oczekiwane metryki**: R² ~0.70-0.85
-                        """)
-            
+                        st.write(
+                            "- 📊 ~18k wierszy × 13 kolumn\n"
+                            "- 🎯 Target: `AveragePrice`\n"
+                            "- 📅 Lata 2015–2018, regiony USA, typ: conventional/organic\n"
+                            "- 📈 Oczekiwane R²: ~0.70–0.85"
+                        )
+
             elif data_source == "🌸 Demo: Iris":
                 if st.button("📥 Wczytaj Iris Dataset", type="primary"):
                     try:
@@ -503,22 +506,18 @@ def main():
                             df = iris.frame
                             dataset_name = "iris"
                             st.success("✅ Demo dataset Iris wczytany!")
-                            st.info("🎯 **Idealny dla klasyfikacji** - rozpoznawanie gatunków kwiatów na podstawie wymiarów")
+                            st.info("🎯 **Typ problemu**: Klasyfikacja (3 klasy).")
                     except Exception as e:
                         st.error(f"❌ Błąd: {str(e)}")
-                
-                # Info o datasecie
-                if not df is not None:
+
+                if df is None:
                     with st.expander("ℹ️ O datasecie Iris"):
-                        st.write("""
-                        **Iris Flower Classification**
-                        - 📊 150 wierszy × 5 kolumn
-                        - 🎯 Target: `target` (gatunek: setosa, versicolor, virginica)
-                        - 🌸 Cechy: długość/szerokość płatków i działek
-                        - 📈 **Typ problemu**: Klasyfikacja (3 klasy)
-                        - 🏆 **Oczekiwane metryki**: Accuracy ~0.95+
-                        """)
-            
+                        st.write(
+                            "- 📊 150 wierszy × 5 kolumn\n"
+                            "- 🎯 Target: `target` (setosa/versicolor/virginica)\n"
+                            "- 📈 Accuracy zwykle 0.95+"
+                        )
+
             elif data_source == "📊 Demo: Wine":
                 if st.button("📥 Wczytaj Wine Dataset", type="primary"):
                     try:
@@ -528,121 +527,109 @@ def main():
                             df = wine.frame
                             dataset_name = "wine"
                             st.success("✅ Demo dataset Wine wczytany!")
-                            st.info("🎯 **Idealny dla klasyfikacji** - rozpoznawanie gatunków wina na podstawie składu chemicznego")
+                            st.info("🎯 **Typ problemu**: Klasyfikacja (3 klasy).")
                     except Exception as e:
                         st.error(f"❌ Błąd: {str(e)}")
-                
-                # Info o datasecie
-                if not df is not None:
+
+                if df is None:
                     with st.expander("ℹ️ O datasecie Wine"):
-                        st.write("""
-                        **Wine Classification**
-                        - 📊 178 wierszy × 14 kolumn
-                        - 🎯 Target: `target` (klasa wina: 0, 1, 2)
-                        - 🍷 Cechy: alkohol, kwasowość, magnez, etc.
-                        - 📈 **Typ problemu**: Klasyfikacja (3 klasy)
-                        - 🏆 **Oczekiwane metryki**: Accuracy ~0.90+
-                        """)
-            
+                        st.write(
+                            "- 📊 178 wierszy × 14 kolumn\n"
+                            "- 🎯 Target: `target` (0/1/2)\n"
+                            "- 🍷 Cechy chemiczne; Accuracy zwykle 0.90+"
+                        )
+
             # Jeśli dane zostały wczytane
             if df is not None:
                 state.dataset = df
-                state.dataset_name = dataset_name
-                
-                # Reset innych stanów
+                state.dataset_name = dataset_name or "uploaded_data"
+
+                # Reset stanów zależnych
                 state.target_column = None
                 state.target_recommendations = []
                 state.training_result = None
                 state.training_completed = False
-                
-                st.success(f"✅ Wczytano {len(df)} wierszy i {len(df.columns)} kolumn")
-                
-                # Podgląd danych
+
+                st.success(f"✅ Wczytano {len(df)} wierszy i {len(df.columns)} kolumn.")
+
                 render_data_preview(df)
-                
+
                 # Walidacja
                 validation = validate_dataframe(df)
-                if not validation['valid']:
+                if not validation.get('valid', True):
                     st.error("❌ Problemy z danymi:")
-                    for error in validation['errors']:
+                    for error in validation.get('errors', []):
                         st.error(f"• {error}")
-                
-                if validation['warnings']:
-                    for warning in validation['warnings']:
-                        st.warning(f"⚠️ {warning}")
-        
+
+                for warning in validation.get('warnings', []):
+                    st.warning(f"⚠️ {warning}")
+
         # TAB 2: Wybór targetu
         with tab2:
             if state.dataset is None:
-                st.info("📁 Najpierw wczytaj dane w zakładce 'Dane'")
+                st.info("📁 Najpierw wczytaj dane w zakładce **Dane**.")
             else:
-                # NOWE: Użyj LLM-powered target selection
                 selected_target = render_smart_target_section_with_llm(
-                    state.dataset, 
+                    state.dataset,
                     state.dataset_name
                 )
-                
+
                 if selected_target:
                     state.target_column = selected_target
                     st.success(f"✅ Target ustawiony: {selected_target}")
-                    
-                    # Podgląd targetu
+
                     with st.expander("👀 Podgląd wybranego targetu", expanded=True):
                         target_series = state.dataset[selected_target]
-                        
+
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             st.metric("Typ", str(target_series.dtype))
                         with col2:
-                            st.metric("Unikalne", target_series.nunique())
+                            st.metric("Unikalne", int(target_series.nunique()))
                         with col3:
-                            st.metric("Braki", target_series.isna().sum())
+                            st.metric("Braki", int(target_series.isna().sum()))
                         with col4:
                             missing_pct = target_series.isna().mean() * 100
                             st.metric("Braki %", f"{missing_pct:.1f}%")
-                        
-                        # Wykryj typ problemu
+
                         problem_type = infer_problem_type(state.dataset, selected_target)
                         st.info(f"🔍 Wykryty typ problemu: **{problem_type}**")
-                        
+
                         # Podgląd rozkładu
                         if problem_type.lower() == "classification":
-                            value_counts = target_series.value_counts().head(10)
+                            value_counts = target_series.value_counts().head(20)
                             st.bar_chart(value_counts)
-                            
-                            # Sprawdź balans klas
-                            if len(value_counts) > 1:
+                            if len(value_counts) > 1 and value_counts.min() > 0:
                                 imbalance_ratio = value_counts.max() / value_counts.min()
                                 if imbalance_ratio > 3:
                                     st.warning(f"⚠️ Niebalans klas: {imbalance_ratio:.1f}:1")
                         else:
                             fig = px.histogram(target_series.dropna(), title="Rozkład wartości")
                             st.plotly_chart(fig, use_container_width=True)
-        
+
         # TAB 3: EDA
         with tab3:
             if state.dataset is None:
-                st.info("📁 Najpierw wczytaj dane")
+                st.info("📁 Najpierw wczytaj dane.")
             else:
                 render_eda_section(state.dataset, state.target_column)
-        
+
         # TAB 4: Trening
         with tab4:
             if state.dataset is None:
-                st.info("📁 Najpierw wczytaj dane")
+                st.info("📁 Najpierw wczytaj dane.")
             elif not state.target_column:
-                st.info("🎯 Najpierw wybierz target")
+                st.info("🎯 Najpierw wybierz target.")
             else:
                 st.header("🤖 Trening modelu AutoML")
-                
+
                 # Konfiguracja
                 config = render_model_config_section(state.dataset, state.target_column)
-                
+
                 # Przycisk treningu
                 if st.button("🚀 Trenuj model", type="primary", use_container_width=True):
-                    with st.spinner("Trenuję model... To może potrwać kilka minut."):
+                    with st.spinner("Trenuję model…"):
                         try:
-                            # Konfiguracja modelu
                             model_config = ModelConfig(
                                 target=state.target_column,
                                 engine=config['engine'],
@@ -652,17 +639,15 @@ def main():
                                 stratify=config['stratify'],
                                 enable_probabilities=config['enable_probabilities']
                             )
-                            
-                            # Trening
+
                             start_time = time.time()
                             result = train_model_comprehensive(state.dataset, model_config)
                             training_time = time.time() - start_time
-                            
-                            # Zapisz wynik
+
                             state.training_result = result
                             state.training_completed = True
-                            
-                            # Zapisz do historii
+
+                            # Zapis rekordu do historii
                             training_record = create_training_record(
                                 model_config=model_config,
                                 result=result,
@@ -670,51 +655,51 @@ def main():
                             )
                             training_record.training_time = training_time
                             training_record.dataset_name = state.dataset_name
-                            
+
                             save_training_record(db_manager, training_record)
-                            
+
                             st.success("✅ Trening zakończony pomyślnie!")
-                            
+
                         except Exception as e:
                             st.error(f"❌ Błąd treningu: {str(e)}")
                             st.code(traceback.format_exc())
-        
+
         # TAB 5: Wyniki
         with tab5:
             if not state.training_completed or not state.training_result:
-                st.info("🤖 Najpierw wytrenuj model")
+                st.info("🤖 Najpierw wytrenuj model.")
             else:
                 st.header("📈 Wyniki treningu")
-                
+
                 # Dashboard metryk
                 show_metrics_dashboard(state.training_result)
-                
+
                 # Wizualizacje
-                if state.training_result.metadata:
-                    validation_info = state.training_result.metadata.get('validation_info', {})
-                    problem_type = state.training_result.metadata.get('problem_type', '').lower()
-                    
-                    if validation_info.get('y_true') and validation_info.get('y_pred'):
-                        st.subheader("📊 Wizualizacje wyników")
-                        
-                        if problem_type == "regression":
-                            plot_regression_results(
-                                validation_info['y_true'], 
-                                validation_info['y_pred']
-                            )
-                        elif problem_type == "classification":
-                            plot_confusion_matrix(
-                                validation_info['y_true'], 
-                                validation_info['y_pred']
-                            )
-                
+                validation_info = (state.training_result.metadata or {}).get('validation_info', {})
+                problem_type = (state.training_result.metadata or {}).get('problem_type', '').lower()
+
+                if validation_info.get('y_true') is not None and validation_info.get('y_pred') is not None:
+                    st.subheader("📊 Wizualizacje wyników")
+                    if problem_type == "regression":
+                        plot_regression_results(
+                            validation_info['y_true'],
+                            validation_info['y_pred']
+                        )
+                    elif problem_type == "classification":
+                        plot_confusion_matrix(
+                            validation_info['y_true'],
+                            validation_info['y_pred']
+                        )
+
                 # Feature importance
-                if not state.training_result.feature_importance.empty:
+                if hasattr(state.training_result, "feature_importance") and \
+                   isinstance(state.training_result.feature_importance, pd.DataFrame) and \
+                   not state.training_result.feature_importance.empty:
                     st.subheader("🏆 Ważność cech")
-                    
+
                     n_features = min(20, len(state.training_result.feature_importance))
                     top_features = state.training_result.feature_importance.head(n_features)
-                    
+
                     fig = px.bar(
                         top_features,
                         x='importance',
@@ -724,21 +709,19 @@ def main():
                     )
                     fig.update_layout(height=max(400, n_features * 25))
                     st.plotly_chart(fig, use_container_width=True)
-        
-        # Sekcje dodatkowe poniżej tabsów
+
+        # TAB 6: Modele (Rejestr)
+        with tab6:
+            render_model_registry(state, models_dir)
+
+        # TAB 7: Historia
+        with tab7:
+            render_training_history(db_manager)
+
+        # Stopka
         st.divider()
-        
-        # Model Registry
-        render_model_registry(state, models_dir)
-        
-        st.divider()
-        
-        # Historia
-        render_training_history(db_manager)
-        
-        # Footer
         render_footer()
-    
+
     except Exception as e:
         st.error(f"❌ Krytyczny błąd aplikacji: {str(e)}")
         st.code(traceback.format_exc())
