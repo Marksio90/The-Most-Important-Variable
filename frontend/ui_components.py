@@ -566,7 +566,7 @@ def render_data_preview_enhanced(df: pd.DataFrame, dataset_name: str) -> None:
             for col in categorical_cols[:5]:  # Max 5 kolumn
                 top_values = df[col].value_counts().head(3)
                 st.write(f"• **{col}**: {', '.join([f'{v} ({c})' for v, c in top_values.items()])}")
-                
+
 def render_footer() -> None:
     """Renderuje profesjonalną stopkę aplikacji."""
     st.markdown("---")
