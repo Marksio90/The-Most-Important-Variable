@@ -98,14 +98,40 @@ def _minimal_render_sidebar():
         st.success("Ustawienia zresetowane.")
         st.experimental_rerun()
 
+# --- Lokalny fallback EDA (bez interaktywnych wykresów) ---
+def render_eda_section(df: pd.DataFrame) -> None:
+    st.subheader("Podstawowe statystyki")
+    st.write("**Kształt:**", f"{df.shape[0]} wierszy × {df.shape[1]} kolumn")
+    st.write("**Typy kolumn:**")
+    st.write(pd.DataFrame({"dtype": df.dtypes.astype(str)}))
+
+    # Podsumowania liczbowe
+    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if num_cols:
+        st.write("**Opis statystyczny (kolumny liczbowe):**")
+        st.dataframe(df[num_cols].describe().transpose(), use_container_width=True)
+    else:
+        st.info("Brak kolumn liczbowych do statystyk opisowych.")
+
+    # Unikatowe wartości dla krótkich kolumn kategorycznych/tekstowych
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    if cat_cols:
+        with st.expander("Podgląd unikatowych wartości (do 20 na kolumnę)"):
+            for c in cat_cols[:30]:
+                uniq = df[c].dropna().unique()
+                st.write(f"**{c}** — unikatowe: {min(len(uniq), 20)} / {len(uniq)}")
+                st.write(uniq[:20])
+
+
 # ====== NASZE MODUŁY (z paczek 1-8) ======
 from config.settings import get_settings
 from frontend.ui_components import (
     render_sidebar, render_footer, render_upload_section,
     render_model_config_section, render_training_results,
-    render_data_preview_enhanced, render_eda_section,
+    render_data_preview_enhanced,
     render_download_buttons
 )
+
 # Nadpisujemy importowany render_sidebar lokalną wersją:
 render_sidebar = _minimal_render_sidebar
 
