@@ -19,7 +19,9 @@ except Exception:
     load_dotenv = None
 
 from pathlib import Path as _Path
+
 def _load_env_files_override():
+    # Ładujemy .env kolejno — config/.env może nadpisać główne
     if load_dotenv is None:
         return
     for p in (_Path(".env"), _Path("config/.env")):
@@ -27,6 +29,7 @@ def _load_env_files_override():
             load_dotenv(dotenv_path=p, override=True)
 
 def _pull_key_from_secrets_override():
+    # Szukamy różnych wariantów nazwy w secrets
     for k in ("OPENAI_API_KEY", "openai_api_key", "openai", "openaiKey"):
         try:
             v = st.secrets.get(k)
@@ -44,23 +47,33 @@ def _pull_key_from_environ_override():
     return None
 
 def ensure_openai_api_key_override() -> bool:
+    # 1) Załaduj .env (jeśli jest)
     _load_env_files_override()
+    # 2) Priorytet: secrets -> environment
     key = _pull_key_from_secrets_override() or _pull_key_from_environ_override()
     if key:
-        os.environ["OPENAI_API_KEY"] = key
+        os.environ["OPENAI_API_KEY"] = key  # normalizacja do stałej nazwy
         st.session_state["openai_api_key"] = key
         return True
     return False
 
+
 # Minimal, pomocny sidebar (bez bajerów wizualnych)
 def _minimal_render_sidebar():
+    import os
+    from pathlib import Path
+    import streamlit as st
+
     st.header("⚙️ Ustawienia")
+
+    # 1) Spróbuj załadować klucz
     has_key = ensure_openai_api_key_override()
     if has_key:
         st.success("✅ Klucz OpenAI: ustawiony")
     else:
         st.error("❌ Brak klucza OpenAI")
 
+    # 2) Akcje narzędziowe
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Wczytaj .env", use_container_width=True):
@@ -68,8 +81,8 @@ def _minimal_render_sidebar():
             if ok:
                 st.success("Wczytano .env / secrets — klucz dostępny.")
             else:
-                st.error("Nie znaleziono klucza.")
-            st.experimental_rerun()
+                st.error("Nie znaleziono klucza ani w .env, ani w secrets.")
+            st.rerun()
     with c2:
         if st.button("Wyczyść cache", use_container_width=True):
             try:
@@ -81,8 +94,9 @@ def _minimal_render_sidebar():
             except Exception:
                 pass
             st.success("Cache wyczyszczony.")
-            st.experimental_rerun()
+            st.rerun()
 
+    # 3) Ręczne podanie klucza (opcjonalnie)
     with st.expander("Wklej klucz OpenAI (opcjonalnie)"):
         typed = st.text_input("OPENAI_API_KEY", type="password", value="")
         if st.button("Ustaw klucz tymczasowo"):
@@ -90,15 +104,46 @@ def _minimal_render_sidebar():
                 os.environ["OPENAI_API_KEY"] = typed.strip()
                 st.session_state["openai_api_key"] = typed.strip()
                 st.success("Klucz ustawiony (do końca sesji).")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.warning("Wpisz klucz.")
 
+    # 4) Diagnostyka — sprawdź gdzie szukamy klucza i co widzi aplikacja
+    with st.expander("🛠 Diagnostyka klucza"):
+        env_paths = [Path(".env"), Path("config/.env")]
+        st.write("**Sprawdzane ścieżki .env:**")
+        for p in env_paths:
+            st.write(f"- `{p}` — **{'ISTNIEJE' if p.exists() else 'brak'}**")
+
+        # co jest w secrets
+        secrets_candidates = ("OPENAI_API_KEY", "openai_api_key", "openai", "openaiKey")
+        secrets_found = []
+        for k in secrets_candidates:
+            try:
+                v = st.secrets.get(k)
+            except Exception:
+                v = None
+            if v:
+                secrets_found.append(k)
+        st.write("**st.secrets:**", ", ".join(secrets_found) if secrets_found else "— nic nie znaleziono —")
+
+        # co jest w env
+        env_key = os.environ.get("OPENAI_API_KEY", "")
+        masked = (env_key[:4] + "..." + env_key[-4:]) if env_key else "(pusty)"
+        st.write("**os.environ['OPENAI_API_KEY']**:", masked)
+
+        ss_key = st.session_state.get("openai_api_key", "")
+        masked_ss = (ss_key[:4] + "..." + ss_key[-4:]) if ss_key else "(pusty)"
+        st.write("**st.session_state['openai_api_key']**:", masked_ss)
+
+        st.caption("Upewnij się, że nazwa zmiennej to dokładnie **OPENAI_API_KEY** (wielkie litery).")
+
+    # 5) Reset ustawień
     if st.button("Reset ustawień", use_container_width=True):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.success("Ustawienia zresetowane.")
-        st.experimental_rerun()
+        st.rerun()
 
 # --- Lokalny fallback EDA (bez interaktywnych wykresów) ---
 def render_eda_section(df: pd.DataFrame) -> None:
