@@ -15,77 +15,63 @@ from config.settings import MLEngine
 
 
 def render_sidebar() -> Dict[str, Any]:
-    """Renderuje sidebar z działającymi ustawieniami globalnymi."""
-    st.sidebar.header("⚙️ Ustawienia aplikacji")
-    
-    # Inicjalizacja wartości domyślnych jeśli nie ma w session_state
-    if "tmiv_color_theme" not in st.session_state:
-        st.session_state.tmiv_color_theme = "default"
-    if "tmiv_detail_level" not in st.session_state:
-        st.session_state.tmiv_detail_level = "intermediate"
-    if "tmiv_chart_height" not in st.session_state:
-        st.session_state.tmiv_chart_height = 500
-    if "tmiv_show_grid" not in st.session_state:
-        st.session_state.tmiv_show_grid = True
-    if "tmiv_interactive_charts" not in st.session_state:
-        st.session_state.tmiv_interactive_charts = True
-    
-    settings = {}
-    
-    # Tema kolorów - NAPRAWIONA: używa session_state
-    settings['color_theme'] = st.sidebar.selectbox(
-        "Paleta kolorów wykresów:",
-        ["default", "viridis", "plasma", "blues", "reds", "greens"],
-        index=["default", "viridis", "plasma", "blues", "reds", "greens"].index(st.session_state.tmiv_color_theme),
-        help="Wybierz paletę kolorów dla wszystkich wykresów",
-        key="tmiv_color_theme"
-    )
-    
-    # Poziom szczegółowości - NAPRAWIONA: używa session_state
-    settings['detail_level'] = st.sidebar.selectbox(
-        "Poziom szczegółowości:",
-        ["basic", "intermediate", "advanced"],
-        index=["basic", "intermediate", "advanced"].index(st.session_state.tmiv_detail_level),
-        help="Kontroluje ilość wyświetlanych informacji i opcji",
-        key="tmiv_detail_level"
-    )
-    
-    # Informacja o aktualnych ustawieniach
-    if settings['detail_level'] != "basic":
-        st.sidebar.success(f"🎨 Tema: {settings['color_theme']}")
-        st.sidebar.info(f"📊 Poziom: {settings['detail_level']}")
-    
-    # Ustawienia wykresów - NAPRAWIONE: używa session_state
-    with st.sidebar.expander("📊 Parametry wizualizacji", expanded=False):
-        settings['chart_height'] = st.slider(
-            "Wysokość wykresów (px):", 
-            200, 1000, 
-            st.session_state.tmiv_chart_height,
-            step=50,
-            key="tmiv_chart_height"
-        )
-        settings['show_grid'] = st.checkbox(
-            "Pokaż siatkę na wykresach", 
-            value=st.session_state.tmiv_show_grid,
-            key="tmiv_show_grid"
-        )
-        settings['interactive_charts'] = st.checkbox(
-            "Interaktywne wykresy", 
-            value=st.session_state.tmiv_interactive_charts,
-            key="tmiv_interactive_charts"
-        )
-    
-    # Reset ustawień
-    if st.sidebar.button("🔄 Resetuj ustawienia"):
-        st.session_state.tmiv_color_theme = "default"
-        st.session_state.tmiv_detail_level = "intermediate"
-        st.session_state.tmiv_chart_height = 500
-        st.session_state.tmiv_show_grid = True
-        st.session_state.tmiv_interactive_charts = True
-        st.rerun()
-    
-    return settings
+    st.header("⚙️ Ustawienia")
 
+    # --- Status klucza OpenAI ---
+    current_key = os.environ.get("OPENAI_API_KEY", "")
+    if current_key:
+        st.success("✅ Klucz OpenAI: ustawiony (z .env / secrets)")
+    else:
+        st.error("❌ Brak klucza OpenAI")
+
+    # --- Akcje narzędziowe ---
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Wczytaj .env", use_container_width=True):
+            ok = ensure_openai_api_key()
+            if ok:
+                st.success("Wczytano .env / secrets. Klucz jest dostępny.")
+            else:
+                st.error("Nie znaleziono klucza w .env ani w secrets.")
+            st.experimental_rerun()
+
+    with col2:
+        if st.button("Wyczyść cache", use_container_width=True):
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
+            st.success("Cache wyczyszczony.")
+            st.experimental_rerun()
+
+    # --- Szybkie wklejenie klucza (opcjonalnie) ---
+    with st.expander("Wklej klucz OpenAI (opcjonalnie)"):
+        typed_key = st.text_input("OPENAI_API_KEY", type="password", value="")
+        if st.button("Ustaw klucz tymczasowo", type="primary"):
+            if typed_key.strip():
+                os.environ["OPENAI_API_KEY"] = typed_key.strip()
+                st.session_state["openai_api_key"] = typed_key.strip()
+                st.success("Klucz został ustawiony tymczasowo (nadpisuje .env do końca sesji).")
+                st.experimental_rerun()
+            else:
+                st.warning("Wpisz klucz.")
+
+    # --- Reset ustawień (zostawiamy zgodnie z prośbą) ---
+    if st.button("Reset ustawień", use_container_width=True):
+        keys = list(st.session_state.keys())
+        for k in keys:
+            del st.session_state[k]
+        st.success("Ustawienia zresetowane.")
+        st.experimental_rerun()
+
+    # Zwracamy minimalny słownik (na wszelki wypadek)
+    return {
+        "openai_key_set": bool(os.environ.get("OPENAI_API_KEY")),
+    }
 
 def render_upload_section() -> Optional[pd.DataFrame]:
     """Renderuje sekcję upload z zaawansowanymi opcjami."""
