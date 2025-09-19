@@ -99,48 +99,35 @@ def render_upload_section() -> Optional[pd.DataFrame]:
 
 
 def render_data_preview(df: pd.DataFrame) -> None:
-    """Renderuje podgląd wczytanych danych."""
     st.subheader("👀 Podgląd danych")
-    
-    # Szybkie statystyki
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
+
+    # zapamiętaj liczbę wierszy między rerunami
+    default_n = min(100, len(df))
+    n = st.number_input(
+        "Liczba wierszy do podglądu",
+        min_value=5, max_value=int(min(5000, len(df))),
+        value=int(st.session_state.get("tmiv_preview_rows", default_n)),
+        step=5,
+        key="tmiv_preview_rows",
+        help="Zmiana nie wczytuje ponownie pliku – podgląd jest natychmiastowy."
+    )
+
+    # oddzielny key dla tabeli, żeby Streamlit nie „mrugał” komponentem
+    st.dataframe(
+        df.head(int(n)),
+        use_container_width=True,
+        hide_index=False,
+        key="tmiv_preview_table"
+    )
+
+    # szybkie metadane
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Wiersze", f"{len(df):,}")
+        st.metric("Wiersze (całość)", f"{len(df):,}")
     with col2:
         st.metric("Kolumny", f"{len(df.columns):,}")
     with col3:
-        memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
-        st.metric("Pamięć", f"{memory_mb:.1f} MB")
-    with col4:
-        missing_cells = df.isna().sum().sum()
-        st.metric("Braki", f"{missing_cells:,}")
-    with col5:
-        numeric_cols = len(df.select_dtypes(include=[np.number]).columns)
-        st.metric("Numeryczne", numeric_cols)
-    
-    # Taby podglądu
-    preview_tab1, preview_tab2, preview_tab3 = st.tabs(["📋 Pierwsze wiersze", "ℹ️ Info", "📊 Statystyki"])
-    
-    with preview_tab1:
-        n_rows = st.slider(
-            "Liczba wierszy do podglądu:", 
-            min_value=5, 
-            max_value=min(50, len(df)), 
-            value=10,
-            key="data_preview_slider"  
-        )
-        st.dataframe(df.head(n_rows), use_container_width=True)
-    
-    with preview_tab2:
-        info_df = _create_info_dataframe(df)
-        st.dataframe(info_df, use_container_width=True, hide_index=True)
-    
-    with preview_tab3:
-        if len(df.select_dtypes(include=[np.number]).columns) > 0:
-            st.dataframe(df.describe(), use_container_width=True)
-        else:
-            st.info("Brak kolumn numerycznych do statystyk")
+        st.metric("Pamięć", f"{df.memory_usage(deep=True).sum() / 1024 / 1024:.1f} MB")
 
 
 def render_model_config_section(df: pd.DataFrame, target_col: str) -> Dict[str, Any]:
