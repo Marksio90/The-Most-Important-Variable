@@ -102,10 +102,24 @@ class LLMTargetSelector:
     def __init__(self, openai_api_key: Optional[str] = None):
         self.api_key = openai_api_key or get_openai_key_from_envs()
         self.fallback_selector = SimpleFallbackSelector()  # NAPRAWIONE: Używa lokalnej klasy
+        self._openai_available = None  # Cache dla sprawdzenia dostępności
     
     def is_available(self) -> bool:
-        """Sprawdza czy LLM jest dostępny."""
-        return bool(self.api_key)
+        """Sprawdza czy LLM jest dostępny - NAPRAWIONE: bez wyświetlania błędów."""
+        if not self.api_key:
+            return False
+        
+        # Cache wyniku żeby nie importować wielokrotnie
+        if self._openai_available is not None:
+            return self._openai_available
+        
+        try:
+            import openai
+            self._openai_available = True
+            return True
+        except ImportError:
+            self._openai_available = False
+            return False
     
     def analyze_dataset_with_llm(self, df: pd.DataFrame, dataset_name: str = "dataset") -> Optional[LLMTargetAnalysis]:
         """Analizuje dataset przy pomocy LLM i rekomenduje target."""
@@ -141,8 +155,13 @@ class LLMTargetSelector:
             response_text = response.choices[0].message.content
             return self._parse_llm_response(response_text, df)
             
+        except ImportError:
+            # NAPRAWIONE: Nie pokazuj błędu w UI, tylko zwróć None
+            return None
         except Exception as e:
-            st.error(f"Błąd wywołania LLM: {str(e)}")
+            # NAPRAWIONE: Tylko pokazuj błędy API, nie import errors
+            if "No module named" not in str(e):
+                st.error(f"Błąd wywołania LLM: {str(e)}")
             return None
     
     def get_hybrid_recommendations(self, df: pd.DataFrame, dataset_name: str = "dataset") -> Dict[str, Any]:
