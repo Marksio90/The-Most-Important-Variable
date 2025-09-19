@@ -1,4 +1,4 @@
-# backend/utils.py — KOMPLETNE: utilities i helper functions
+# backend/utils.py — NAPRAWIONE: lepszy system kluczy OpenAI + timezone
 from __future__ import annotations
 
 import hashlib
@@ -6,6 +6,7 @@ import os
 import random
 import re
 from typing import Any, Dict, List, Optional, Union, Tuple
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -31,14 +32,12 @@ def seed_everything(seed: int = 42) -> None:
     # Opcjonalnie dla TensorFlow/PyTorch jeśli dostępne
     try:
         import tensorflow as tf  # type: ignore
-
         tf.random.set_seed(seed)
     except Exception:
         pass
 
     try:
         import torch  # type: ignore
-
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)  # type: ignore[attr-defined]
     except Exception:
@@ -577,10 +576,11 @@ def auto_pick_target(df: pd.DataFrame) -> Optional[str]:
 
 
 # ==============================
-# OpenAI key helpers
+# OpenAI key helpers - NAPRAWIONE
 # ==============================
 def get_openai_key_from_envs() -> Optional[str]:
     """
+    NAPRAWIONA wersja z lepszym debugowaniem.
     Priorytety:
       1) st.session_state.temp_openai_key (ręcznie ustawiony w sesji)
       2) st.secrets["OPENAI_API_KEY"] (Streamlit Cloud)
@@ -589,64 +589,101 @@ def get_openai_key_from_envs() -> Optional[str]:
     # 1) session_state
     try:
         import streamlit as st  # type: ignore
-
         if hasattr(st, "session_state") and st.session_state.get("temp_openai_key"):
-            return st.session_state["temp_openai_key"]
+            key = st.session_state["temp_openai_key"]
+            if key and key.startswith("sk-"):
+                print(f"[UTILS] ✅ Klucz OpenAI z session_state")
+                return key
     except Exception:
         pass
 
     # 2) secrets
     try:
         import streamlit as st  # type: ignore
-
         if hasattr(st, "secrets") and "OPENAI_API_KEY" in st.secrets:
             val = st.secrets["OPENAI_API_KEY"]
             if isinstance(val, str) and val.startswith("sk-"):
+                print(f"[UTILS] ✅ Klucz OpenAI z st.secrets")
                 return val
     except Exception:
         pass
 
     # 3) .env / ENV
-    try:
-        from dotenv import load_dotenv  # type: ignore
-
-        load_dotenv()
-    except Exception:
-        pass
-
     for key_name in ("OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_SECRET_KEY"):
         val = os.getenv(key_name)
         if val and isinstance(val, str) and val.startswith("sk-"):
+            print(f"[UTILS] ✅ Klucz OpenAI z {key_name}")
             return val
+    
+    print(f"[UTILS] ❌ Brak prawidłowego klucza OpenAI")
     return None
 
 
 def set_openai_key_temp(key: str) -> bool:
     """
-    Bezpiecznie ustawia klucz tymczasowo (sesja + os.environ).
+    NAPRAWIONA wersja - ustawia klucz tymczasowo i wymusza odświeżenie cache.
     Zwraca True jeśli wygląda poprawnie.
     """
     if not isinstance(key, str) or not key.startswith("sk-"):
         return False
+    
     try:
         import streamlit as st  # type: ignore
-
         if hasattr(st, "session_state"):
             st.session_state["temp_openai_key"] = key
+            print(f"[UTILS] ✅ Ustawiono klucz w session_state")
     except Exception:
         pass
+        
     os.environ["OPENAI_API_KEY"] = key
+    print(f"[UTILS] ✅ Ustawiono klucz w os.environ")
+    
+    # Wymuś odświeżenie cache konfiguracji
+    try:
+        from config.settings import clear_settings_cache
+        clear_settings_cache()
+    except Exception:
+        pass
+    
     return True
 
 
+def clear_openai_key():
+    """Czyści klucz OpenAI ze wszystkich miejsc."""
+    try:
+        import streamlit as st
+        if hasattr(st, "session_state") and "temp_openai_key" in st.session_state:
+            del st.session_state["temp_openai_key"]
+            print(f"[UTILS] 🗑️ Usunięto klucz z session_state")
+    except Exception:
+        pass
+        
+    for key_name in ("OPENAI_API_KEY", "OPENAI_KEY", "OPENAI_SECRET_KEY"):
+        if key_name in os.environ:
+            del os.environ[key_name]
+            print(f"[UTILS] 🗑️ Usunięto klucz z {key_name}")
+
+
 # ==============================
-# Czas / strefy
+# Czas / strefy - NAPRAWIONE
 # ==============================
-def to_local(dt: Any, timezone: str = "Europe/Warsaw") -> Any:
+def get_local_timezone() -> str:
+    """Zwraca lokalną strefę czasową (na podstawie systemu)."""
+    try:
+        import time
+        return time.tzname[0] if time.daylight == 0 else time.tzname[1]
+    except Exception:
+        return "Europe/Warsaw"  # fallback dla Polski
+
+
+def to_local(dt: Any, timezone_str: str = None) -> Any:
     """
-    Konwertuje datetime do lokalnej strefy czasowej.
+    NAPRAWIONA wersja - konwertuje datetime do lokalnej strefy czasowej.
     Obsługuje pandas.Timestamp i python datetime.
     """
+    if timezone_str is None:
+        timezone_str = get_local_timezone()
+        
     try:
         from datetime import datetime
         import pytz  # type: ignore
@@ -658,13 +695,13 @@ def to_local(dt: Any, timezone: str = "Europe/Warsaw") -> Any:
         if hasattr(dt, "tz_localize") or hasattr(dt, "tz_convert"):
             if getattr(dt, "tz", None) is None:
                 dt = dt.tz_localize("UTC")  # type: ignore[attr-defined]
-            return dt.tz_convert(timezone)  # type: ignore[attr-defined]
+            return dt.tz_convert(timezone_str)  # type: ignore[attr-defined]
 
         # python datetime
         if isinstance(dt, datetime):
             if dt.tzinfo is None:
                 dt = pytz.UTC.localize(dt)
-            return dt.astimezone(pytz.timezone(timezone))
+            return dt.astimezone(pytz.timezone(timezone_str))
 
         return dt
     except Exception:
@@ -673,6 +710,21 @@ def to_local(dt: Any, timezone: str = "Europe/Warsaw") -> Any:
 
 def utc_now_iso_z() -> str:
     """Zwraca aktualny czas UTC w formacie ISO 8601 zakończony 'Z'."""
-    from datetime import datetime, timezone
-
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def local_now_iso() -> str:
+    """Zwraca aktualny czas lokalny w formacie ISO 8601."""
+    return datetime.now().isoformat()
+
+
+def format_datetime_for_display(dt: datetime, include_seconds: bool = True) -> str:
+    """Formatuje datetime dla wyświetlenia użytkownikowi (lokalna strefa)."""
+    try:
+        local_dt = to_local(dt)
+        if include_seconds:
+            return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            return local_dt.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(dt)
