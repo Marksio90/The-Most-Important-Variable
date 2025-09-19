@@ -113,6 +113,7 @@ class _DataclassSettings:
 
     # Trening / walidacja
     default_random_state: int = 42
+    random_seed: int = 42  # Alias dla kompatybilności z app.py
     default_cv_folds: int = 3
     default_test_size: float = 0.2
 
@@ -168,6 +169,7 @@ if HAS_PYDANTIC:
 
             # Trening / walidacja
             default_random_state: int = 42
+            random_seed: int = 42  # Alias dla kompatybilności z app.py
             default_cv_folds: int = 3
             default_test_size: float = 0.2
 
@@ -221,6 +223,7 @@ if HAS_PYDANTIC:
 
             # Trening / walidacja
             default_random_state: int = 42
+            random_seed: int = 42  # Alias dla kompatybilności z app.py  
             default_cv_folds: int = 3
             default_test_size: float = 0.2
 
@@ -418,6 +421,7 @@ def get_settings() -> Settings:
         s.enable_catboost = _env_bool(os.getenv("TMIV_ENABLE_CATBOOST"), s.enable_catboost)
 
         s.default_random_state = int(os.getenv("TMIV_DEFAULT_RANDOM_STATE", s.default_random_state))
+        s.random_seed = int(os.getenv("TMIV_RANDOM_SEED", s.random_seed))  # Dodane
         s.default_cv_folds = int(os.getenv("TMIV_DEFAULT_CV_FOLDS", s.default_cv_folds))
         s.default_test_size = float(os.getenv("TMIV_DEFAULT_TEST_SIZE", s.default_test_size))
 
