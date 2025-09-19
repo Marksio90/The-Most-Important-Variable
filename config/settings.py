@@ -123,6 +123,7 @@ class _DataclassSettings:
     # Ścieżki
     output_dir: str = "tmiv_out"
     history_db_path: str = "tmiv_out/history.sqlite"
+    database_url: str = "sqlite:///tmiv_data.db"  # Dodane dla kompatybilności z app.py
     models_dir: str = "tmiv_out/models"
 
     # LLM / klucze (tylko flaga; realny klucz pobieramy w utils.get_openai_key_from_envs)
@@ -177,6 +178,7 @@ if HAS_PYDANTIC:
             # Ścieżki
             output_dir: str = "tmiv_out"
             history_db_path: str = "tmiv_out/history.sqlite"
+            database_url: str = "sqlite:///tmiv_data.db"  # Dodane dla kompatybilności z app.py
             models_dir: str = "tmiv_out/models"
 
             # LLM
@@ -229,6 +231,7 @@ if HAS_PYDANTIC:
             # Ścieżki
             output_dir: str = "tmiv_out"
             history_db_path: str = "tmiv_out/history.sqlite"
+            database_url: str = "sqlite:///tmiv_data.db"  # Dodane dla kompatybilności z app.py
             models_dir: str = "tmiv_out/models"
 
             # LLM
@@ -344,6 +347,7 @@ def _override_from_secrets(s: Settings) -> Settings:
     _maybe_set("output_dir", "OUTPUT_DIR")
     _maybe_set("models_dir", "MODELS_DIR")
     _maybe_set("history_db_path", "HISTORY_DB_PATH")
+    _maybe_set("database_url", "DATABASE_URL")  # Dodane
 
     return s
 
@@ -422,6 +426,7 @@ def get_settings() -> Settings:
 
         s.output_dir = os.getenv("TMIV_OUTPUT_DIR", s.output_dir)
         s.history_db_path = os.getenv("TMIV_HISTORY_DB_PATH", s.history_db_path)
+        s.database_url = os.getenv("TMIV_DATABASE_URL", s.database_url)  # Dodane
         s.models_dir = os.getenv("TMIV_MODELS_DIR", s.models_dir)
 
         s.llm_enabled_by_default = _env_bool(os.getenv("TMIV_LLM_ENABLED_BY_DEFAULT"),
@@ -479,6 +484,7 @@ def as_dict(settings: Optional[Settings] = None) -> Dict[str, Any]:
         "output_dir": s.output_dir,
         "models_dir": s.models_dir,
         "history_db_path": s.history_db_path,
+        "database_url": getattr(s, "database_url", "sqlite:///tmiv_data.db"),  # Dodane
         "enable_xgboost": s.enable_xgboost,
         "enable_lightgbm": s.enable_lightgbm,
         "enable_catboost": s.enable_catboost,
