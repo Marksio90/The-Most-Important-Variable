@@ -1,7 +1,7 @@
-# ml_integration.py — TMIV: trenowanie, metryki, FI, artefakty (sklearn + opcjonalnie LGBM/XGB/CB)
+# backend/ml_integration.py — NAPRAWIONE: stratyfikacja + lepsze błędy
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.impute import SimpleImputer
 
 from sklearn.metrics import (
@@ -43,7 +43,6 @@ XGB = _soft_import("xgboost")
 LGBM = _soft_import("lightgbm")
 CATB = _soft_import("catboost")
 
-# Utils (nasze) - naprawiony import
 from backend.utils import (
     seed_everything, infer_problem_type,
     hash_dataframe_signature
@@ -59,12 +58,11 @@ class ModelConfig:
     target: str
     engine: EngineName = "auto"
     test_size: float = 0.2
-    cv_folds: int = 3  # (opcjonalnie użyjesz później; teraz split + holdout)
+    cv_folds: int = 3
     random_state: int = 42
     stratify: bool = True
-    # ewentualne flagi
     enable_probabilities: bool = True
-    max_categories: int = 200  # odcięcie rzadkich kategorii (opcjonalnie do future work)
+    max_categories: int = 200
 
 @dataclass
 class TrainingResult:
@@ -75,30 +73,35 @@ class TrainingResult:
 
 
 # ---------------------------
-# Kompatybilny OneHotEncoder
+# NAPRAWIONA STRATYFIKACJA
 # ---------------------------
-def _create_ohe_compatible() -> OneHotEncoder:
+def _safe_stratify_check(y: pd.Series, min_samples_per_class: int = 2) -> bool:
     """
-    Tworzy OneHotEncoder kompatybilny z różnymi wersjami sklearn.
-    Obsługuje zmianę parametru sparse -> sparse_output między wersjami.
+    Sprawdza czy można bezpiecznie użyć stratyfikacji.
+    Zwraca True tylko jeśli każda klasa ma >= min_samples_per_class przykładów.
     """
     try:
-        # Próbuj nowszą wersję (sklearn >= 1.2)
+        value_counts = y.value_counts(dropna=True)
+        if len(value_counts) < 2:  # mniej niż 2 klasy
+            return False
+        return (value_counts >= min_samples_per_class).all()
+    except Exception:
+        return False
+
+
+def _create_ohe_compatible() -> OneHotEncoder:
+    """Kompatybilny OneHotEncoder dla różnych wersji sklearn."""
+    try:
         return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     except TypeError:
-        # Fallback na starszą wersję (sklearn < 1.2)
         try:
             return OneHotEncoder(handle_unknown="ignore", sparse=False)
         except Exception:
-            # Minimalna wersja bez sparse
             return OneHotEncoder(handle_unknown="ignore")
 
 
 def _safe_categorical_columns(df: pd.DataFrame, exclude_cols: List[str]) -> List[str]:
-    """
-    Bezpiecznie wykrywa kolumny kategoryczne, które mogą być przetworzone przez OHE.
-    Odrzuca kolumny numeryczne, które mogłyby powodować błąd 'continuous is not supported'.
-    """
+    """Bezpiecznie wykrywa kolumny kategoryczne dla OHE."""
     categorical_cols = []
     
     for col in df.columns:
@@ -117,13 +120,11 @@ def _safe_categorical_columns(df: pd.DataFrame, exclude_cols: List[str]) -> List
         # Kategoryczne: object, category, bool
         if dtype in ['object', 'category', 'bool']:
             categorical_cols.append(col)
-        # Numeryczne integer o małej liczbie unikalnych wartości (może być kategoryczne)
+        # Numeryczne integer o małej liczbie unikalnych wartości
         elif dtype in ['int8', 'int16', 'int32', 'int64']:
             nunique = series.nunique()
-            # Maksymalnie 50 unikalnych wartości dla integer -> traktuj jako kategoryczne
             if nunique <= 50:
                 categorical_cols.append(col)
-        # Pomiń float i inne numeryczne typy
     
     return categorical_cols
 
@@ -137,14 +138,8 @@ def train_model_comprehensive(
     use_advanced: bool = True,
 ) -> TrainingResult:
     """
-    Jeden punkt wejścia:
-    - automatyczna detekcja typu problemu,
-    - preprocessing (imputacja num/kat + one-hot),
-    - wybór silnika (AUTO preferuje LGBM/XGB/CB gdy dostępny),
-    - split, trening, metryki, FI,
-    - metadata.validation_info: y_true, y_pred, labels (gdy ma sens).
+    NAPRAWIONY główny punkt wejścia z obsługą błędów stratyfikacji.
     """
-    # Seed
     seed_everything(cfg.random_state)
 
     if cfg.target not in df.columns:
@@ -160,33 +155,36 @@ def train_model_comprehensive(
     # Detekcja problemu (heurystyka)
     problem_type = infer_problem_type(df, cfg.target).lower()
     if problem_type not in ("regression", "classification"):
-        # fallback: jeśli numeric i >=3 unikatowe -> regression, w przeciwnym razie classification
         if pd.api.types.is_numeric_dtype(y) and y.nunique(dropna=True) >= 3:
             problem_type = "regression"
         else:
             problem_type = "classification"
 
-    # BEZPIECZNY podział cech wg dtype
-    num_cols = X.select_dtypes(include=["number", "float", "int", "float64", "int64"]).columns.tolist()
+    # NAPRAWIONE: Bezpieczna stratyfikacja
+    can_stratify = False
+    stratify_param = None
     
-    # Użyj bezpiecznej funkcji dla kategorycznych
+    if problem_type == "classification" and cfg.stratify:
+        can_stratify = _safe_stratify_check(y, min_samples_per_class=2)
+        if can_stratify:
+            stratify_param = y
+        else:
+            # Dodaj ostrzeżenie do metadanych
+            pass
+
+    # Podział cech wg dtype - BEZPIECZNY
+    num_cols = X.select_dtypes(include=["number", "float", "int", "float64", "int64"]).columns.tolist()
     cat_cols = _safe_categorical_columns(X, exclude_cols=num_cols)
     
-    # Debug info
-    print(f"Numerical columns ({len(num_cols)}): {num_cols[:5]}...")
-    print(f"Categorical columns ({len(cat_cols)}): {cat_cols[:5]}...")
-
-    # Preprocessing - z kompatybilnym OHE
+    # Preprocessing z kompatybilnym OHE
     transformers = []
     
-    # Transformer numeryczny (jeśli są kolumny numeryczne)
     if num_cols:
         num_tr = Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
         ])
         transformers.append(("num", num_tr, num_cols))
     
-    # Transformer kategoryczny (jeśli są kolumny kategoryczne)
     if cat_cols:
         cat_tr = Pipeline([
             ("imputer", SimpleImputer(strategy="most_frequent")),
@@ -194,7 +192,6 @@ def train_model_comprehensive(
         ])
         transformers.append(("cat", cat_tr, cat_cols))
     
-    # Sprawdź czy mamy jakiekolwiek transformery
     if not transformers:
         raise ValueError("Brak kolumn do przetworzenia - ani numerycznych, ani kategorycznych!")
     
@@ -206,8 +203,6 @@ def train_model_comprehensive(
 
     # Wybór silnika
     selected_engine = _select_engine(cfg.engine, problem_type)
-
-    # Model bazowy w zależności od typu
     model = _build_model(selected_engine, problem_type, cfg.random_state)
 
     # Pipeline
@@ -216,14 +211,26 @@ def train_model_comprehensive(
         ("model", model)
     ])
 
-    # Split
-    stratify_param = y if (problem_type == "classification" and cfg.stratify and y.nunique() > 1) else None
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=cfg.test_size,
-        random_state=cfg.random_state,
-        stratify=stratify_param
-    )
+    # NAPRAWIONY Split z bezpieczną stratyfikacją
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y,
+            test_size=cfg.test_size,
+            random_state=cfg.random_state,
+            stratify=stratify_param  # None jeśli nie można stratyfikować
+        )
+    except ValueError as e:
+        if "least populated class" in str(e) or "too few" in str(e):
+            # Fallback bez stratyfikacji
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y,
+                test_size=cfg.test_size,
+                random_state=cfg.random_state,
+                stratify=None
+            )
+            can_stratify = False
+        else:
+            raise
 
     # Fit
     pipe.fit(X_train, y_train)
@@ -234,13 +241,27 @@ def train_model_comprehensive(
     # Metryki
     metrics = _compute_metrics(problem_type, y_test, y_pred, pipe, X_test, cfg)
 
-    # Feature importance (z modelu po preprocesie)
+    # Feature importance
     fi_df = _extract_feature_importance(pipe, preprocessor, num_cols, cat_cols)
 
-    # Validation info (dla wykresów w app)
+    # Validation info
     validation_info = _build_validation_info(problem_type, y_test, y_pred, pipe, X_test, cfg)
 
-    # Metadata
+    # ROZSZERZONE Metadata z ostrzeżeniami
+    warnings = []
+    if problem_type == "classification" and not can_stratify:
+        warnings.append("Nie można użyć stratyfikacji - niektóre klasy mają za mało przykładów")
+    
+    # Sprawdź balans klas dla klasyfikacji
+    if problem_type == "classification":
+        value_counts = y.value_counts()
+        min_class_size = value_counts.min()
+        max_class_size = value_counts.max()
+        imbalance_ratio = max_class_size / min_class_size if min_class_size > 0 else float('inf')
+        
+        if imbalance_ratio > 10:
+            warnings.append(f"Silny niebalans klas (ratio: {imbalance_ratio:.1f}:1)")
+
     meta: Dict[str, Any] = {
         "engine": selected_engine,
         "problem_type": problem_type,
@@ -252,7 +273,10 @@ def train_model_comprehensive(
         "data_signature": hash_dataframe_signature(df),
         "sklearn_version": SKLEARN_VERSION,
         "num_cols_count": len(num_cols),
-        "cat_cols_count": len(cat_cols)
+        "cat_cols_count": len(cat_cols),
+        "warnings": warnings,
+        "stratified": can_stratify,
+        "class_distribution": y.value_counts().to_dict() if problem_type == "classification" else None
     }
 
     return TrainingResult(
@@ -264,15 +288,12 @@ def train_model_comprehensive(
 
 
 # ---------------------------
-# Artefakty modelu (replay)
+# Pozostałe funkcje (bez zmian)
 # ---------------------------
 def save_model_artifacts(run_dir: Path, model: Any, meta: Dict[str, Any]) -> None:
-    """
-    Zapisuje pipeline (z preprocessingiem) + metadane JSON.
-    """
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-
+    
     try:
         import joblib
     except Exception as e:
@@ -283,9 +304,6 @@ def save_model_artifacts(run_dir: Path, model: Any, meta: Dict[str, Any]) -> Non
 
 
 def load_model_artifacts(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
-    """
-    Ładuje pipeline i metadane.
-    """
     run_dir = Path(run_dir)
     try:
         import joblib
@@ -297,13 +315,7 @@ def load_model_artifacts(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
     return model, meta
 
 
-# ---------------------------
-# Selekcja silnika i budowa
-# ---------------------------
 def _select_engine(engine: EngineName, problem_type: str) -> str:
-    """
-    AUTO: preferencja LGBM > XGB > CAT > sklearn
-    """
     if engine != "auto":
         return engine
 
@@ -317,10 +329,6 @@ def _select_engine(engine: EngineName, problem_type: str) -> str:
 
 
 def _build_model(engine: str, problem_type: str, random_state: int):
-    """
-    Tworzy model bazowy pod dany silnik i typ problemu.
-    Minimalny zestaw parametrów, ale deterministyczny (seed).
-    """
     if engine == "lightgbm" and LGBM is not None:
         if problem_type == "regression":
             return LGBM.LGBMRegressor(random_state=random_state, n_estimators=300, verbosity=-1)
@@ -332,7 +340,6 @@ def _build_model(engine: str, problem_type: str, random_state: int):
         else:
             return XGB.XGBClassifier(random_state=random_state, n_estimators=400, tree_method="hist", n_jobs=1, use_label_encoder=False, eval_metric="logloss")
     if engine == "catboost" and CATB is not None:
-        # CatBoost ma własne encodery, ale tu używamy naszego preprocesu; ustawiamy prosty model
         if problem_type == "regression":
             return CATB.CatBoostRegressor(random_state=random_state, iterations=300, verbose=False)
         else:
@@ -340,16 +347,11 @@ def _build_model(engine: str, problem_type: str, random_state: int):
 
     # sklearn (domyślnie)
     if problem_type == "regression":
-        # szybki i dość mocny baseline (na rozmaite dane)
         return HistGradientBoostingRegressor(random_state=random_state)
     else:
-        # baseline klasyfikacyjny
         return HistGradientBoostingClassifier(random_state=random_state)
 
 
-# ---------------------------
-# Metryki, FI, walidacje
-# ---------------------------
 def _compute_metrics(
     problem_type: str,
     y_true: pd.Series,
@@ -370,27 +372,22 @@ def _compute_metrics(
             "r2": r2
         })
     else:
-        # klasyfikacja
         acc = float(accuracy_score(y_true, y_pred))
-        # Macro-F1 do niebalansów
         f1 = float(f1_score(y_true, y_pred, average="macro"))
         metrics.update({
             "accuracy": acc,
             "f1_macro": f1
         })
 
-        # ROC-AUC (tylko dla binarnej / wieloklasowej z proba + ovo/ovr)
         try:
             if cfg.enable_probabilities and hasattr(pipe["model"], "predict_proba"):
                 proba = pipe.predict_proba(X_test)
                 if proba is not None:
                     if proba.ndim == 1 or proba.shape[1] == 2:
-                        # AUC dla klasy 1 (binarna)
                         pos = proba[:, 1] if proba.ndim > 1 else proba
                         auc = float(roc_auc_score(y_true, pos))
                         metrics["roc_auc"] = auc
                     else:
-                        # Wieloklasowa (macro OVR)
                         auc = float(roc_auc_score(y_true, proba, multi_class="ovr"))
                         metrics["roc_auc_ovr_macro"] = auc
         except Exception:
@@ -400,23 +397,17 @@ def _compute_metrics(
 
 
 def _expanded_feature_names(pre: ColumnTransformer, num_cols: List[str], cat_cols: List[str]) -> List[str]:
-    """
-    Zwraca nazwy cech po transformacji (uwzględnia one-hot).
-    """
     feature_names: List[str] = []
 
-    # num
     if len(num_cols) > 0:
         feature_names.extend(num_cols)
 
-    # cat (OneHotEncoder)
     if len(cat_cols) > 0:
         try:
             ohe = pre.named_transformers_["cat"].named_steps["ohe"]
             cats = ohe.get_feature_names_out(cat_cols)
             feature_names.extend(cats.tolist())
         except Exception:
-            # jeśli nie ma OHE (brak kat), dodaj oryginalne nazwy
             feature_names.extend(cat_cols)
 
     return feature_names
@@ -428,10 +419,6 @@ def _extract_feature_importance(
     num_cols: List[str],
     cat_cols: List[str]
 ) -> Optional[pd.DataFrame]:
-    """
-    Wyciąga FI z modelu, gdy to możliwe (feature_importances_ / coef_).
-    Zwraca DataFrame: feature, importance (posortowane malejąco).
-    """
     try:
         model = pipe.named_steps["model"]
     except Exception:
@@ -450,7 +437,6 @@ def _extract_feature_importance(
     if importances is None and hasattr(model, "coef_"):
         coef = getattr(model, "coef_")
         if isinstance(coef, np.ndarray):
-            # multiclass -> weź średnią po klasach
             if coef.ndim > 1:
                 coef = np.mean(np.abs(coef), axis=0)
             importances = np.abs(coef)
@@ -458,7 +444,6 @@ def _extract_feature_importance(
     if importances is None:
         return None
 
-    # Bezpieczeństwo długości
     importances = np.ravel(importances)
     n = min(len(importances), len(feat_names))
     data = pd.DataFrame({
@@ -477,11 +462,6 @@ def _build_validation_info(
     X_test: pd.DataFrame,
     cfg: ModelConfig
 ) -> Dict[str, Any]:
-    """
-    Zbiera dane do wykresów w UI: y_true/y_pred (regresja),
-    confusion (klasyfikacja) oraz etykiety.
-    Zwraca mały wektor (pierwsze 20k), by nie zalewać UI.
-    """
     out: Dict[str, Any] = {}
     MAX_N = 20000
 
@@ -496,7 +476,6 @@ def _build_validation_info(
             out["y_true"] = yt.tolist()
             out["y_pred"] = yp.tolist()
     else:
-        # klasyfikacja
         if yt is not None and yp is not None:
             out["y_true"] = yt.tolist()
             out["y_pred"] = yp.tolist()
