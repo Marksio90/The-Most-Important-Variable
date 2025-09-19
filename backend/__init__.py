@@ -1,52 +1,70 @@
-# backend/__init__.py — punkt wejścia pakietu backend
-from __future__ import annotations
+# backend/__init__.py — NAPRAWIONY: tylko istniejące importy
+"""Backend moduły TMIV - ML integration, smart target, utilities."""
 
-"""
-Pakiet backend TMIV.
+# Import tylko tych funkcji które rzeczywiście istnieją w naszych paczach
 
-Zapewnia stabilne importy dla warstwy aplikacji:
-    from backend import (
-        SmartTargetDetector, auto_pick_target, infer_problem_type,
-        get_openai_key_from_envs, seed_everything,
-        utc_now_iso_z, to_utc_iso_z, to_local,
-        HAS_MATPLOTLIB, HAS_SEABORN, HAS_XGBOOST, HAS_LGBM, HAS_CATBOOST,
-        optional_dep_message, hash_dataframe_signature, flatten_dict
-    )
-"""
+from .ml_integration import (
+    ModelConfig,
+    TrainingResult, 
+    train_model_comprehensive,
+    save_model_artifacts,
+    load_model_artifacts
+)
 
-__version__ = "0.1.0"
+from .smart_target import (
+    SmartTargetSelector,
+    TargetRecommendation,
+    format_target_explanation,
+    format_alternatives_list
+)
 
-# Re-eksport helperów z backend.utils
 from .utils import (
-    # klucze/sekrety
-    get_openai_key_from_envs,
-    # czas
-    utc_now_iso_z, to_utc_iso_z, to_local,
-    # seed
     seed_everything,
-    # target/problem
-    SmartTargetDetector, auto_pick_target, infer_problem_type, is_id_like,
-    # opcjonalne zależności
-    HAS_MATPLOTLIB, HAS_SEABORN, HAS_XGBOOST, HAS_LGBM, HAS_CATBOOST,
-    optional_dep_message,
-    # drobiazgi
-    hash_dataframe_signature, flatten_dict,
+    hash_dataframe_signature,
+    infer_problem_type,
+    is_id_like,
+    SmartTargetDetector,
+    validate_dataframe,
+    preprocess_column_names,
+    detect_data_types,
+    generate_ml_report,
+    debug_dataframe,
+    compare_dataframes,
+    # Compatibility functions (nowo dodane)
+    get_openai_key_from_envs,
+    auto_pick_target,
+    to_local,
+    utc_now_iso_z
 )
 
 __all__ = [
-    # meta
-    "__version__",
-    # klucze/sekrety
-    "get_openai_key_from_envs",
-    # czas
-    "utc_now_iso_z", "to_utc_iso_z", "to_local",
-    # seed
-    "seed_everything",
-    # target/problem
-    "SmartTargetDetector", "auto_pick_target", "infer_problem_type", "is_id_like",
-    # opcjonalne zależności
-    "HAS_MATPLOTLIB", "HAS_SEABORN", "HAS_XGBOOST", "HAS_LGBM", "HAS_CATBOOST",
-    "optional_dep_message",
-    # drobiazgi
-    "hash_dataframe_signature", "flatten_dict",
+    # ML Integration
+    'ModelConfig',
+    'TrainingResult',
+    'train_model_comprehensive', 
+    'save_model_artifacts',
+    'load_model_artifacts',
+    
+    # Smart Target
+    'SmartTargetSelector',
+    'TargetRecommendation',
+    'format_target_explanation',
+    'format_alternatives_list',
+    
+    # Utils
+    'seed_everything',
+    'hash_dataframe_signature', 
+    'infer_problem_type',
+    'is_id_like',
+    'SmartTargetDetector',
+    'validate_dataframe',
+    'preprocess_column_names',
+    'detect_data_types',
+    'generate_ml_report',
+    'debug_dataframe',
+    'compare_dataframes',
+    'get_openai_key_from_envs',
+    'auto_pick_target', 
+    'to_local',
+    'utc_now_iso_z'
 ]
