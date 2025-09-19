@@ -192,7 +192,7 @@ class TMIVApp:
         """Renderuje główną zawartość aplikacji."""
         # Sidebar
         with st.sidebar:
-            render_sidebar(self.settings)
+            render_sidebar()
             
             # Konfiguracja OpenAI
             openai_configured = render_openai_config()
