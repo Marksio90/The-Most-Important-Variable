@@ -1,39 +1,71 @@
-# requirements.txt — Zależności aplikacji TMIV (Python 3.11 compatible)
-
-# CORE DEPENDENCIES (wymagane do działania)
-streamlit>=1.28.0
+# requirements.txt — Wszystkie zależności aplikacji TMIV
+# Core ML & Data Science
 pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
+scipy>=1.10.0
 
-# ML LIBRARIES  
+# ML Libraries
 xgboost>=2.0.0
 lightgbm>=4.0.0
 catboost>=1.2.0
 
-# VISUALIZATION
+# Streamlit & UI
+streamlit>=1.28.0
+streamlit-option-menu>=0.3.6
+streamlit-aggrid>=0.3.4
+
+# Visualization
 plotly>=5.15.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 kaleido>=0.2.1
 
-# UTILITIES
-python-dotenv>=1.0.0
-pydantic>=2.4.0
-joblib>=1.3.0
-sqlalchemy>=2.0.0
-
-# DATA PROCESSING
-openpyxl>=3.1.0
-chardet>=5.2.0
-python-dateutil>=2.8.0
-
-# OPENAI (optional - for LLM features)
+# OpenAI & LLM
 openai>=1.3.0
 tiktoken>=0.5.0
 
-# OPTIONAL ENHANCEMENTS
-streamlit-option-menu>=0.3.6
+# Database & Storage
+sqlalchemy>=2.0.0
+
+# Data Processing
+openpyxl>=3.1.0  # Excel support
+xlrd>=2.0.0      # Excel support
+chardet>=5.2.0   # Character encoding detection
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.4.0
+python-dateutil>=2.8.0
+pytz>=2023.3
+typing-extensions>=4.7.0
+
+# File Processing
+joblib>=1.3.0    # Model serialization
+
+# Development & Testing (optional)
+pytest>=7.4.0
+pytest-cov>=4.1.0
+black>=23.7.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# Performance (optional)
+numba>=0.58.0
+pandas-profiling>=3.6.0
+
+# Additional utilities
 requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2023.7.22
+
+# Image processing (for chart exports)
 Pillow>=10.0.0
+
+# Memory profiling (optional)
+memory-profiler>=0.61.0
+psutil>=5.9.0
+
+# Progress bars & UI enhancements
 tqdm>=4.66.0
+rich>=13.5.0
