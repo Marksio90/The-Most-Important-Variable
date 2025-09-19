@@ -313,21 +313,32 @@ export OPENAI_API_KEY="sk-..."
 OPENAI_API_KEY=sk-...
         """)
         
-        # Opcja 2: Session state (tymczasowe)
+        # Opcja 2: Session state (tymczasowe) - NAPRAWIONE: bez zapętlenia
         st.write("**2. Tymczasowy klucz (tylko ta sesja):**")
         temp_key = st.text_input(
             "Klucz OpenAI:",
             type="password",
             placeholder="sk-...",
-            help="Klucz jest używany tylko w tej sesji"
+            help="Klucz jest używany tylko w tej sesji",
+            key="temp_openai_input"
         )
         
-        if temp_key and temp_key.startswith("sk-"):
-            # Ustaw w session state
-            st.session_state.temp_openai_key = temp_key
-            os.environ["OPENAI_API_KEY"] = temp_key
-            st.success("✅ Klucz ustawiony tymczasowo")
-            st.rerun()
+        # NAPRAWIONE: Przycisk zamiast automatycznego ustawiania
+        if st.button("🔑 Ustaw klucz", disabled=not (temp_key and temp_key.startswith("sk-"))):
+            if temp_key and temp_key.startswith("sk-"):
+                # Ustaw w session state i environment
+                st.session_state.temp_openai_key = temp_key
+                os.environ["OPENAI_API_KEY"] = temp_key
+                st.success("✅ Klucz ustawiony tymczasowo")
+                # USUNIĘTO st.rerun() - nie potrzebne, sidebar się odświeży automatycznie
+        
+        # Przycisk wyczyść klucz
+        if has_key and st.button("🗑️ Wyczyść klucz"):
+            if "temp_openai_key" in st.session_state:
+                del st.session_state.temp_openai_key
+            if "OPENAI_API_KEY" in os.environ:
+                del os.environ["OPENAI_API_KEY"]
+            st.info("Klucz wyczyszczony")
         
         # Opcja 3: Info o kluczu
         st.write("**3. Jak zdobyć klucz:**")
@@ -337,9 +348,6 @@ OPENAI_API_KEY=sk-...
         3. API Keys → Create new secret key
         4. Skopiuj klucz (sk-...)
         """)
-        
-        if st.button("🔄 Odśwież status"):
-            st.rerun()
     
     return has_key
 
