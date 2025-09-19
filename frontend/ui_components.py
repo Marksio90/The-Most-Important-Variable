@@ -342,28 +342,230 @@ def render_model_config_section(df: pd.DataFrame, target_col: str) -> Dict[str, 
     return config
 
 
-def render_training_results(result: TrainingResult, show_details: bool = True) -> None:
-    """Renderuje wyniki treningu z rozbudowanymi metrykami."""
-    if not result:
-        st.warning("Brak wyników do wyświetlenia")
-        return
+def render_training_results(result: Any, export_files: Dict[str, str]) -> None:
+    """Renderuje wyniki treningu modelu."""
+    col1, col2 = st.columns(2)
     
-    st.subheader("📈 Wyniki treningu modelu")
+    with col1:
+        st.subheader("📊 Metryki modelu")
+        
+        # Wyświetl wszystkie metryki w grid
+        metrics = result.metrics
+        if metrics:
+            # Grupuj metryki w rzędy po 2
+            metric_items = list(metrics.items())
+            for i in range(0, len(metric_items), 2):
+                subcol1, subcol2 = st.columns(2)
+                
+                # Pierwsza metryka
+                if i < len(metric_items):
+                    name, value = metric_items[i]
+                    display_name = name.replace('_', ' ').title()
+                    if isinstance(value, (int, float)):
+                        subcol1.metric(display_name, f"{value:.4f}")
+                
+                # Druga metryka (jeśli istnieje)
+                if i + 1 < len(metric_items):
+                    name, value = metric_items[i + 1]
+                    display_name = name.replace('_', ' ').title()
+                    if isinstance(value, (int, float)):
+                        subcol2.metric(display_name, f"{value:.4f}")
     
-    # Główne metryki - ROZBUDOWANE
-    _render_enhanced_metrics(result)
+    with col2:
+        st.subheader("⏱️ Metadane treningu")
+        
+        metadata = result.metadata
+        if metadata:
+            st.metric("Czas treningu", f"{metadata.get('training_time_seconds', 0):.2f}s")
+            st.metric("Silnik ML", metadata.get('engine', 'Unknown'))
+            st.metric("Problem", metadata.get('problem_type', 'Unknown').title())
     
     # Feature importance
     if not result.feature_importance.empty:
-        _render_enhanced_feature_importance(result.feature_importance)
+        st.subheader("🏆 Ważność cech")
+        
+        # Wykres
+        fig = px.bar(
+            result.feature_importance.head(15),
+            x='importance',
+            y='feature',
+            orientation='h',
+            title='Top 15 najważniejszych cech'
+        )
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
     
-    # Dodatkowe analizy
-    if show_details:
-        _render_model_diagnostics(result)
-        _render_detailed_results(result)
+    # Eksportowane pliki
+    if export_files:
+        st.subheader("📁 Eksportowane pliki")
+        
+        for file_type, file_path in export_files.items():
+            if file_path:
+                col_icon, col_desc = st.columns([1, 4])
+                with col_icon:
+                    if file_type == 'model':
+                        st.write("🤖")
+                    elif file_type == 'html_report':
+                        st.write("📊")
+                    elif file_type == 'feature_importance':
+                        st.write("📈")
+                    else:
+                        st.write("📄")
+                
+                with col_desc:
+                    st.write(f"**{file_type.replace('_', ' ').title()}**: `{file_path}`")
+
+
+def render_model_registry_section(db_manager: Any, current_training_id: Optional[str] = None) -> None:
+    """Renderuje sekcję rejestru modeli."""
+    st.subheader("💾 Rejestr modeli")
     
-    # Metadane modelu
-    _render_model_metadata(result.metadata)
+    try:
+        # Pobierz ostatnie modele z bazy
+        from db.db_utils import get_training_history
+        recent_models = get_training_history(db_manager, limit=10)
+        
+        if not recent_models:
+            st.info("📝 Brak zapisanych modeli")
+            return
+        
+        # Wyświetl modele w tabeli
+        model_data = []
+        for record in recent_models:
+            # Oznacz aktualny model
+            indicator = "🔥" if record.run_id == current_training_id else "📊"
+            
+            model_data.append({
+                "Status": indicator,
+                "Run ID": record.run_id[:8] + "...",
+                "Dataset": record.dataset_name,
+                "Target": record.target,
+                "Engine": record.engine,
+                "R²/Acc": f"{record.metrics.get('r2', record.metrics.get('accuracy', 0)):.3f}",
+                "Data": record.created_at.strftime("%m-%d %H:%M"),
+                "Czas": f"{record.training_time_seconds:.1f}s"
+            })
+        
+        # Wyświetl jako DataFrame
+        if model_data:
+            df = pd.DataFrame(model_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        
+        # Opcje zarządzania
+        st.subheader("🔧 Zarządzanie modelami")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🗑️ Wyczyść stare modele", help="Usuń modele starsze niż 30 dni"):
+                st.info("Funkcja w przygotowaniu")
+        
+        with col2:
+            if st.button("📊 Porównaj modele", help="Porównaj metryki różnych modeli"):
+                st.info("Funkcja w przygotowaniu")
+        
+        with col3:
+            if st.button("📥 Eksportuj rejestr", help="Pobierz rejestr jako CSV"):
+                if model_data:
+                    csv = pd.DataFrame(model_data).to_csv(index=False)
+                    st.download_button(
+                        label="💾 Pobierz CSV",
+                        data=csv,
+                        file_name=f"tmiv_models_registry_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.warning("Brak danych do eksportu")
+    
+    except Exception as e:
+        st.error(f"❌ Błąd rejestru modeli: {e}")
+
+
+def render_data_preview_enhanced(df: pd.DataFrame, dataset_name: str) -> None:
+    """Renderuje rozbudowany podgląd danych bez powtórzeń."""
+    st.subheader(f"📊 Analiza datasetu: {dataset_name}")
+    
+    # Podstawowe statystyki w metrikach
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("📏 Wiersze", f"{len(df):,}")
+    with col2:
+        st.metric("📊 Kolumny", f"{len(df.columns):,}")
+    with col3:
+        memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
+        st.metric("💾 Pamięć", f"{memory_mb:.1f} MB")
+    with col4:
+        missing_pct = (df.isna().sum().sum() / (len(df) * len(df.columns)) * 100)
+        st.metric("❌ Braki", f"{missing_pct:.1f}%")
+    
+    # Tabs dla różnych widoków
+    tab_preview, tab_types, tab_quality, tab_stats = st.tabs([
+        "👀 Podgląd", "🏷️ Typy danych", "🔍 Jakość", "📈 Statystyki"
+    ])
+    
+    with tab_preview:
+        # Slider dla liczby wierszy
+        max_rows = min(1000, len(df))
+        num_rows = st.slider("Liczba wierszy do wyświetlenia:", 5, max_rows, min(100, max_rows))
+        
+        # Podgląd danych
+        st.dataframe(df.head(num_rows), use_container_width=True)
+    
+    with tab_types:
+        # Analiza typów danych
+        type_info = []
+        for col in df.columns:
+            col_type = str(df[col].dtype)
+            null_count = df[col].isna().sum()
+            unique_count = df[col].nunique()
+            
+            type_info.append({
+                "Kolumna": col,
+                "Typ": col_type,
+                "Unikalne": unique_count,
+                "Braki": null_count,
+                "% Braków": f"{(null_count/len(df)*100):.1f}%"
+            })
+        
+        st.dataframe(pd.DataFrame(type_info), use_container_width=True, hide_index=True)
+    
+    with tab_quality:
+        # Analiza jakości danych
+        st.write("**Podsumowanie jakości:**")
+        
+        # Duplikaty
+        duplicates = df.duplicated().sum()
+        st.write(f"• Duplikaty: {duplicates:,} wierszy ({(duplicates/len(df)*100):.1f}%)")
+        
+        # Kompletnie puste wiersze
+        empty_rows = df.isna().all(axis=1).sum()
+        st.write(f"• Puste wiersze: {empty_rows:,}")
+        
+        # Kolumny z wysokim % braków
+        high_missing = df.columns[df.isna().mean() > 0.5].tolist()
+        if high_missing:
+            st.write(f"• Kolumny z >50% braków: {', '.join(high_missing)}")
+        
+        # Kolumny z jedną wartością
+        single_value_cols = [col for col in df.columns if df[col].nunique() <= 1]
+        if single_value_cols:
+            st.write(f"• Kolumny z jedną wartością: {', '.join(single_value_cols)}")
+    
+    with tab_stats:
+        # Statystyki dla kolumn numerycznych
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            st.write("**Statystyki kolumn numerycznych:**")
+            st.dataframe(df[numeric_cols].describe(), use_container_width=True)
+        
+        # Rozkład dla kolumn kategorycznych
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+        if len(categorical_cols) > 0:
+            st.write("**Najczęstsze wartości w kolumnach kategorycznych:**")
+            for col in categorical_cols[:5]:  # Max 5 kolumn
+                top_values = df[col].value_counts().head(3)
+                st.write(f"• **{col}**: {', '.join([f'{v} ({c})' for v, c in top_values.items()])}")
 
 
 def render_footer() -> None:
