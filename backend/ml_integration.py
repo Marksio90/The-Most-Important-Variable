@@ -1,7 +1,7 @@
 # ml_integration.py — TMIV: trenowanie, metryki, FI, artefakty (sklearn + opcjonalnie LGBM/XGB/CB)
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Literal
 
@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.impute import SimpleImputer
 
 from sklearn.metrics import (
@@ -21,9 +21,15 @@ from sklearn.metrics import (
     accuracy_score, f1_score, roc_auc_score, confusion_matrix
 )
 
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.ensemble import (
+    RandomForestRegressor, RandomForestClassifier,
     HistGradientBoostingRegressor, HistGradientBoostingClassifier
 )
+
+# Wersja sklearn dla kompatybilności
+import sklearn
+SKLEARN_VERSION = sklearn.__version__
 
 # Opcjonalne silniki
 def _soft_import(name: str):
@@ -37,7 +43,7 @@ XGB = _soft_import("xgboost")
 LGBM = _soft_import("lightgbm")
 CATB = _soft_import("catboost")
 
-# Utils (nasze)
+# Utils (nasze) - naprawiony import
 from backend.utils import (
     seed_everything, infer_problem_type,
     hash_dataframe_signature
@@ -53,12 +59,12 @@ class ModelConfig:
     target: str
     engine: EngineName = "auto"
     test_size: float = 0.2
-    cv_folds: int = 3  # (na przyszłość; obecnie holdout)
+    cv_folds: int = 3  # (opcjonalnie użyjesz później; teraz split + holdout)
     random_state: int = 42
     stratify: bool = True
     # ewentualne flagi
     enable_probabilities: bool = True
-    max_categories: int = 200  # odcięcie rzadkich kategorii (na przyszłość)
+    max_categories: int = 200  # odcięcie rzadkich kategorii (opcjonalnie do future work)
 
 @dataclass
 class TrainingResult:
@@ -66,6 +72,60 @@ class TrainingResult:
     metrics: Dict[str, Any] = field(default_factory=dict)
     feature_importance: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["feature", "importance"]))
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------
+# Kompatybilny OneHotEncoder
+# ---------------------------
+def _create_ohe_compatible() -> OneHotEncoder:
+    """
+    Tworzy OneHotEncoder kompatybilny z różnymi wersjami sklearn.
+    Obsługuje zmianę parametru sparse -> sparse_output między wersjami.
+    """
+    try:
+        # Próbuj nowszą wersję (sklearn >= 1.2)
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        # Fallback na starszą wersję (sklearn < 1.2)
+        try:
+            return OneHotEncoder(handle_unknown="ignore", sparse=False)
+        except Exception:
+            # Minimalna wersja bez sparse
+            return OneHotEncoder(handle_unknown="ignore")
+
+
+def _safe_categorical_columns(df: pd.DataFrame, exclude_cols: List[str]) -> List[str]:
+    """
+    Bezpiecznie wykrywa kolumny kategoryczne, które mogą być przetworzone przez OHE.
+    Odrzuca kolumny numeryczne, które mogłyby powodować błąd 'continuous is not supported'.
+    """
+    categorical_cols = []
+    
+    for col in df.columns:
+        if col in exclude_cols:
+            continue
+            
+        series = df[col]
+        
+        # Pomiń kolumny całkowicie puste
+        if series.isna().all():
+            continue
+            
+        # Sprawdź typ danych
+        dtype = series.dtype
+        
+        # Kategoryczne: object, category, bool
+        if dtype in ['object', 'category', 'bool']:
+            categorical_cols.append(col)
+        # Numeryczne integer o małej liczbie unikalnych wartości (może być kategoryczne)
+        elif dtype in ['int8', 'int16', 'int32', 'int64']:
+            nunique = series.nunique()
+            # Maksymalnie 50 unikalnych wartości dla integer -> traktuj jako kategoryczne
+            if nunique <= 50:
+                categorical_cols.append(col)
+        # Pomiń float i inne numeryczne typy
+    
+    return categorical_cols
 
 
 # ---------------------------
@@ -100,37 +160,46 @@ def train_model_comprehensive(
     # Detekcja problemu (heurystyka)
     problem_type = infer_problem_type(df, cfg.target).lower()
     if problem_type not in ("regression", "classification"):
-        # fallback: numeric & >=3 unikatowe -> regression, inaczej classification
+        # fallback: jeśli numeric i >=3 unikatowe -> regression, w przeciwnym razie classification
         if pd.api.types.is_numeric_dtype(y) and y.nunique(dropna=True) >= 3:
             problem_type = "regression"
         else:
             problem_type = "classification"
 
-    # Podział cech wg dtype
+    # BEZPIECZNY podział cech wg dtype
     num_cols = X.select_dtypes(include=["number", "float", "int", "float64", "int64"]).columns.tolist()
-    cat_cols = [c for c in X.columns if c not in num_cols]
+    
+    # Użyj bezpiecznej funkcji dla kategorycznych
+    cat_cols = _safe_categorical_columns(X, exclude_cols=num_cols)
+    
+    # Debug info
+    print(f"Numerical columns ({len(num_cols)}): {num_cols[:5]}...")
+    print(f"Categorical columns ({len(cat_cols)}): {cat_cols[:5]}...")
 
-    # OneHotEncoder kompatybilny ze starszym sklearn (sparse_output vs sparse)
-    def _ohe_safe() -> OneHotEncoder:
-        try:
-            return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        except TypeError:  # starsze sklearn
-            return OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-    # Preprocessing
-    num_tr = Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-    ])
-    cat_tr = Pipeline([
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("ohe", _ohe_safe())
-    ])
-
+    # Preprocessing - z kompatybilnym OHE
+    transformers = []
+    
+    # Transformer numeryczny (jeśli są kolumny numeryczne)
+    if num_cols:
+        num_tr = Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+        ])
+        transformers.append(("num", num_tr, num_cols))
+    
+    # Transformer kategoryczny (jeśli są kolumny kategoryczne)
+    if cat_cols:
+        cat_tr = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("ohe", _create_ohe_compatible())
+        ])
+        transformers.append(("cat", cat_tr, cat_cols))
+    
+    # Sprawdź czy mamy jakiekolwiek transformery
+    if not transformers:
+        raise ValueError("Brak kolumn do przetworzenia - ani numerycznych, ani kategorycznych!")
+    
     preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", num_tr, num_cols),
-            ("cat", cat_tr, cat_cols)
-        ],
+        transformers=transformers,
         remainder="drop",
         n_jobs=None
     )
@@ -147,19 +216,8 @@ def train_model_comprehensive(
         ("model", model)
     ])
 
-    # ---------- Split (bezpieczny dla rzadkich klas) ----------
-    warnings_local: List[str] = []
-    stratify_param = None
-    if problem_type == "classification" and cfg.stratify:
-        class_counts = y.value_counts()
-        min_class = int(class_counts.min()) if len(class_counts) > 0 else 0
-        if y.nunique() > 1 and min_class >= 2:
-            stratify_param = y
-        else:
-            warnings_local.append(
-                f"Wyłączono stratify przy train/test — najmniej liczna klasa ma {min_class} próbek."
-            )
-
+    # Split
+    stratify_param = y if (problem_type == "classification" and cfg.stratify and y.nunique() > 1) else None
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=cfg.test_size,
@@ -167,34 +225,8 @@ def train_model_comprehensive(
         stratify=stratify_param
     )
 
-    # Jeśli w klasyfikacji train ma tylko jedną klasę → fallback na Dummy
-    from sklearn.dummy import DummyClassifier, DummyRegressor
-    if problem_type == "classification" and pd.Series(y_train).nunique() <= 1:
-        warnings_local.append(
-            "Zbiór treningowy ma jedną klasę — użyto DummyClassifier(strategy='most_frequent')."
-        )
-        pipe = Pipeline([
-            ("prep", preprocessor),
-            ("model", DummyClassifier(strategy="most_frequent"))
-        ])
-
-    # ---------- Fit (z zabezpieczeniem) ----------
-    try:
-        pipe.fit(X_train, y_train)
-    except Exception as fit_err:
-        # Miękki fallback (np. gdy model nie radzi sobie z danymi)
-        warnings_local.append(f"Fallback na Dummy z powodu błędu treningu: {type(fit_err).__name__}.")
-        if problem_type == "classification":
-            pipe = Pipeline([
-                ("prep", preprocessor),
-                ("model", DummyClassifier(strategy="most_frequent"))
-            ])
-        else:
-            pipe = Pipeline([
-                ("prep", preprocessor),
-                ("model", DummyRegressor(strategy="mean"))
-            ])
-        pipe.fit(X_train, y_train)
+    # Fit
+    pipe.fit(X_train, y_train)
 
     # Predict
     y_pred = pipe.predict(X_test)
@@ -217,10 +249,11 @@ def train_model_comprehensive(
         "n_features_after_preproc": int(fi_df.shape[0]) if fi_df is not None and not fi_df.empty else None,
         "feature_names": fi_df["feature"].tolist() if fi_df is not None and not fi_df.empty else list(X.columns),
         "validation_info": validation_info,
-        "data_signature": hash_dataframe_signature(df)
+        "data_signature": hash_dataframe_signature(df),
+        "sklearn_version": SKLEARN_VERSION,
+        "num_cols_count": len(num_cols),
+        "cat_cols_count": len(cat_cols)
     }
-    if warnings_local:
-        meta["warnings"] = warnings_local
 
     return TrainingResult(
         model=pipe,
@@ -260,7 +293,7 @@ def load_model_artifacts(run_dir: Path) -> Tuple[Any, Dict[str, Any]]:
         raise RuntimeError(f"Brak joblib do odczytu modelu: {e}")
 
     model = joblib.load(run_dir / "model.joblib")
-    meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+    meta = json.loads((run_dir / "meta.json").read_text())
     return model, meta
 
 
@@ -290,14 +323,14 @@ def _build_model(engine: str, problem_type: str, random_state: int):
     """
     if engine == "lightgbm" and LGBM is not None:
         if problem_type == "regression":
-            return LGBM.LGBMRegressor(random_state=random_state, n_estimators=300)
+            return LGBM.LGBMRegressor(random_state=random_state, n_estimators=300, verbosity=-1)
         else:
-            return LGBM.LGBMClassifier(random_state=random_state, n_estimators=300)
+            return LGBM.LGBMClassifier(random_state=random_state, n_estimators=300, verbosity=-1)
     if engine == "xgboost" and XGB is not None:
         if problem_type == "regression":
-            return XGB.XGBRegressor(random_state=random_state, n_estimators=400, tree_method="hist", n_jobs=0)
+            return XGB.XGBRegressor(random_state=random_state, n_estimators=400, tree_method="hist", n_jobs=1)
         else:
-            return XGB.XGBClassifier(random_state=random_state, n_estimators=400, tree_method="hist", n_jobs=0, use_label_encoder=False, eval_metric="logloss")
+            return XGB.XGBClassifier(random_state=random_state, n_estimators=400, tree_method="hist", n_jobs=1, use_label_encoder=False, eval_metric="logloss")
     if engine == "catboost" and CATB is not None:
         # CatBoost ma własne encodery, ale tu używamy naszego preprocesu; ustawiamy prosty model
         if problem_type == "regression":
@@ -307,7 +340,7 @@ def _build_model(engine: str, problem_type: str, random_state: int):
 
     # sklearn (domyślnie)
     if problem_type == "regression":
-        # szybki i dość mocny baseline
+        # szybki i dość mocny baseline (na rozmaite dane)
         return HistGradientBoostingRegressor(random_state=random_state)
     else:
         # baseline klasyfikacyjny
@@ -346,15 +379,14 @@ def _compute_metrics(
             "f1_macro": f1
         })
 
-        # ROC-AUC (tylko dla przypadków z predict_proba i sensowną liczbą klas)
+        # ROC-AUC (tylko dla binarnej / wieloklasowej z proba + ovo/ovr)
         try:
-            if cfg.enable_probabilities and hasattr(pipe.named_steps["model"], "predict_proba"):
+            if cfg.enable_probabilities and hasattr(pipe["model"], "predict_proba"):
                 proba = pipe.predict_proba(X_test)
                 if proba is not None:
                     if proba.ndim == 1 or proba.shape[1] == 2:
                         # AUC dla klasy 1 (binarna)
                         pos = proba[:, 1] if proba.ndim > 1 else proba
-                        # może się wywalić, jeśli y_true ma jedną klasę → try/except wyżej
                         auc = float(roc_auc_score(y_true, pos))
                         metrics["roc_auc"] = auc
                     else:
@@ -378,13 +410,14 @@ def _expanded_feature_names(pre: ColumnTransformer, num_cols: List[str], cat_col
         feature_names.extend(num_cols)
 
     # cat (OneHotEncoder)
-    try:
-        ohe = pre.named_transformers_["cat"].named_steps["ohe"]
-        cats = ohe.get_feature_names_out(cat_cols)
-        feature_names.extend(cats.tolist())
-    except Exception:
-        # jeśli nie ma OHE (brak kat), nic nie dodawaj
-        pass
+    if len(cat_cols) > 0:
+        try:
+            ohe = pre.named_transformers_["cat"].named_steps["ohe"]
+            cats = ohe.get_feature_names_out(cat_cols)
+            feature_names.extend(cats.tolist())
+        except Exception:
+            # jeśli nie ma OHE (brak kat), dodaj oryginalne nazwy
+            feature_names.extend(cat_cols)
 
     return feature_names
 
@@ -417,7 +450,7 @@ def _extract_feature_importance(
     if importances is None and hasattr(model, "coef_"):
         coef = getattr(model, "coef_")
         if isinstance(coef, np.ndarray):
-            # multiclass -> średnia wartości bezwzględnych po klasach
+            # multiclass -> weź średnią po klasach
             if coef.ndim > 1:
                 coef = np.mean(np.abs(coef), axis=0)
             importances = np.abs(coef)
