@@ -1,375 +1,532 @@
-# backend/utils.py — uniwersalne helpery TMIV (target, problem type, klucze, czas, seed)
+# backend/utils.py — KOMPLETNE: utilities i helper functions
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple, Dict, Any, List
-from datetime import datetime, timezone
 import hashlib
-import json
-import os
-import re
-import sys
 import random
-
+import re
+from typing import Any, Dict, List, Optional, Union, Tuple
 import numpy as np
 import pandas as pd
 
-# streamlit jest opcjonalne w niektórych skryptach CLI — import warunkowy
-try:
-    import streamlit as st  # type: ignore
-    HAS_STREAMLIT = True
-except Exception:
-    HAS_STREAMLIT = False
 
-
-# ==============================
-#  Opcjonalne zależności — status
-# ==============================
-def _soft_import(mod: str) -> bool:
-    try:
-        __import__(mod)
-        return True
-    except Exception:
-        return False
-
-HAS_MATPLOTLIB = _soft_import("matplotlib")
-HAS_SEABORN    = _soft_import("seaborn")
-HAS_XGBOOST    = _soft_import("xgboost")
-HAS_LGBM       = _soft_import("lightgbm")
-HAS_CATBOOST   = _soft_import("catboost")
-
-OPTIONALS = {
-    "matplotlib": HAS_MATPLOTLIB,
-    "seaborn": HAS_SEABORN,
-    "xgboost": HAS_XGBOOST,
-    "lightgbm": HAS_LGBM,
-    "catboost": HAS_CATBOOST,
-}
-
-
-# =======================================
-#  Klucze i konfiguracje (LLM / sekrety)
-# =======================================
-OPENAI_KEY_ENV_NAMES = [
-    "OPENAI_API_KEY",
-    "OPENAI_KEY",
-    "TMIV_OPENAI_API_KEY",
-]
-
-def get_openai_key_from_envs() -> Optional[str]:
-    """
-    Pobiera klucz z (1) st.session_state.openai_api_key,
-    (2) st.secrets["openai_api_key"|"OPENAI_API_KEY"],
-    (3) zmienne środowiskowe.
-    Zwraca None gdy brak lub nie przechodzi prostej walidacji.
-    """
-    key: Optional[str] = None
-
-    # 1) session_state
-    if HAS_STREAMLIT:
-        try:
-            key = st.session_state.get("openai_api_key") or st.session_state.get("OPENAI_API_KEY")
-        except Exception:
-            pass
-
-    # 2) st.secrets
-    if not key and HAS_STREAMLIT:
-        try:
-            for k in ("openai_api_key", "OPENAI_API_KEY"):
-                if k in st.secrets:
-                    key = st.secrets[k]  # type: ignore[index]
-                    if key:
-                        break
-        except Exception:
-            pass
-
-    # 3) env
-    if not key:
-        for env_name in OPENAI_KEY_ENV_NAMES:
-            v = os.environ.get(env_name)
-            if v:
-                key = v
-                break
-
-    # walidacja (prosta — unikamy fałszywych trafień)
-    if key and _looks_like_openai_key(key):
-        return key.strip()
-
-    return None
-
-
-def _looks_like_openai_key(value: str) -> bool:
-    v = value.strip()
-    # Najczęstsze prefiksy: sk-..., sk-proj-..., sk-org-...
-    return bool(re.match(r"^sk-[-_A-Za-z0-9]{20,}$", v))
-
-
-# =====================
-#  Czas i strefy czasu
-# =====================
-def utc_now_iso_z() -> str:
-    """Zwraca bieżący czas w UTC w formacie ISO-8601 z sufiksem 'Z'."""
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def to_utc_iso_z(dt: datetime) -> str:
-    """Konwertuje datetime (aware/naive) do ISO-8601 UTC z 'Z'."""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def to_local(dt_utc: datetime, tz_name: str = "Europe/Warsaw") -> datetime:
-    """
-    Konwertuje aware UTC -> lokalna strefa (domyślnie Europe/Warsaw).
-    Jeśli dt jest naive, traktujemy jako UTC.
-    """
-    try:
-        import zoneinfo  # py3.9+
-        tz = zoneinfo.ZoneInfo(tz_name)
-    except Exception:
-        # fallback: pozostaw UTC
-        tz = timezone.utc
-
-    if dt_utc.tzinfo is None:
-        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
-    return dt_utc.astimezone(tz)
-
-
-# ==========
-#  Losowość
-# ==========
 def seed_everything(seed: int = 42) -> None:
-    """Ustala seed dla numpy/random (sklearn zwykle przyjmuje random_state w configu)."""
+    """
+    Ustawia seed dla wszystkich generatorów liczb losowych.
+    Zapewnia powtarzalność wyników.
+    """
     random.seed(seed)
     np.random.seed(seed)
+    
+    # Opcjonalnie dla TensorFlow/PyTorch jeśli dostępne
     try:
-        import torch  # type: ignore
+        import tensorflow as tf
+        tf.random.set_seed(seed)
+    except ImportError:
+        pass
+    
+    try:
+        import torch
         torch.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True  # type: ignore
-        torch.backends.cudnn.benchmark = False     # type: ignore
-    except Exception:
+    except ImportError:
         pass
 
 
-# =============================
-#  Target i typ problemu (ML)
-# =============================
-
-# ID-like name pattern
-ID_LIKE_COL_PATTERNS = re.compile(
-    r"(?:^|[_\- ])(id|uuid|guid|index|idx|kod|code|nr|no|number)(?:$|[_\- ])",
-    re.IGNORECASE
-)
-
-# ---- NOWE: priorytet nazw cenowych (znormalizowanych) ----
-PRICE_PRIORITY_ORDER = [
-    "averageprice", "avgprice", "avg_price",  # różne warianty
-    "targetprice", "target_price",
-    "price",
-    "closeprice", "close_price", "close",
-]
-# priorytet klasycznych nazw targetu (po cenowych)
-CLASSIC_TARGET_ORDER = ["target", "label", "y"]
-
-def _normalize_name(name: str) -> str:
-    """Dolower + wywalenie znaków niealfanumerycznych (do porównań nazw)."""
-    return re.sub(r"[^a-z0-9]+", "", str(name).lower())
-
-def is_id_like(series: pd.Series, colname: str) -> bool:
-    """Heurystyka: kolumna wygląda jak identyfikator? (nazwa + wysoka unikalność)."""
-    name_match = bool(ID_LIKE_COL_PATTERNS.search(colname or ""))
-    try:
-        n = len(series)
-        nunique = series.nunique(dropna=True)
-        high_uniqueness = n > 0 and (nunique / max(1, n)) > 0.98
-    except Exception:
-        high_uniqueness = False
-    return name_match or high_uniqueness
-
-def _all_missing(s: pd.Series) -> bool:
-    try:
-        return bool(s.isna().all())
-    except Exception:
-        return False
-
-def _valid_columns(df: pd.DataFrame, exclude: Optional[List[str]] = None) -> List[str]:
-    """Kolumny, które nie są ID-like i nie są w całości puste."""
-    ex = set(exclude or [])
-    out: List[str] = []
-    for c in df.columns:
-        if c in ex:
-            continue
-        try:
-            if not is_id_like(df[c], c) and not _all_missing(df[c]):
-                out.append(c)
-        except Exception:
-            continue
-    return out
-
-def _candidate_targets(df: pd.DataFrame) -> List[str]:
+def hash_dataframe_signature(df: pd.DataFrame) -> str:
     """
-    (Zachowane na potrzeby wewnętrzne) – nie używamy już jego priorytetu w detect_target,
-    bo wprowadziliśmy własny porządek (price > classic > categorical > fallback).
+    Tworzy hash signature DataFrame dla trackingu zmian.
+    Uwzględnia kształt, nazwy kolumn i typ danych.
     """
-    if df is None or df.empty:
-        return []
-    return list(df.columns)
+    signature_data = {
+        'shape': df.shape,
+        'columns': list(df.columns),
+        'dtypes': [str(dtype) for dtype in df.dtypes],
+        'memory_usage': df.memory_usage(deep=True).sum()
+    }
+    
+    signature_str = str(signature_data)
+    return hashlib.md5(signature_str.encode()).hexdigest()[:16]
 
-@dataclass
+
+def infer_problem_type(df: pd.DataFrame, target_col: str) -> str:
+    """
+    Inteligentne wykrywanie typu problemu ML na podstawie targetu.
+    Zwraca 'classification' lub 'regression'.
+    """
+    if target_col not in df.columns:
+        raise ValueError(f"Kolumna '{target_col}' nie istnieje w DataFrame")
+    
+    target_series = df[target_col]
+    
+    # Usuń wartości puste dla analizy
+    target_clean = target_series.dropna()
+    
+    if len(target_clean) == 0:
+        raise ValueError(f"Kolumna '{target_col}' jest całkowicie pusta")
+    
+    # Sprawdź typ danych
+    is_numeric = pd.api.types.is_numeric_dtype(target_clean)
+    unique_count = target_clean.nunique()
+    total_count = len(target_clean)
+    
+    # Reguły klasyfikacji
+    if not is_numeric:
+        return "classification"
+    
+    if unique_count <= 2:
+        return "classification"
+    
+    if unique_count <= 20 and unique_count / total_count <= 0.05:
+        return "classification"
+    
+    # Sprawdź czy wartości wyglądają jak klasy (integer w małym zakresie)
+    if is_numeric and target_clean.dtype in ['int64', 'int32', 'int16', 'int8']:
+        if unique_count <= min(50, total_count * 0.1):
+            return "classification"
+    
+    # Domyślnie regresja dla numerycznych
+    return "regression"
+
+
+def is_id_like(series: pd.Series, column_name: str) -> bool:
+    """
+    Sprawdza czy kolumna wygląda jak identyfikator (ID).
+    ID nie powinno być używane jako target.
+    """
+    col_name_lower = column_name.lower()
+    
+    # Wzorce nazw ID
+    id_patterns = [
+        'id', 'uuid', 'guid', 'key', 'index', 'idx', 
+        '_id', 'userid', 'user_id', 'customer_id',
+        'row_id', 'record_id', 'seq', 'sequence'
+    ]
+    
+    for pattern in id_patterns:
+        if pattern in col_name_lower:
+            return True
+    
+    # Sprawdź charakterystykę danych
+    if pd.api.types.is_numeric_dtype(series):
+        # Sprawdź czy to sekwencja (np. 1,2,3,4,...)
+        clean_series = series.dropna()
+        if len(clean_series) > 1:
+            sorted_values = np.sort(clean_series.unique())
+            if len(sorted_values) > 1:
+                # Sprawdź czy różnice są stałe (sekwencja)
+                diffs = np.diff(sorted_values)
+                if len(set(diffs)) == 1 and diffs[0] == 1:
+                    return True
+    
+    # Sprawdź unikalność (ID powinno być unikalne)
+    if series.nunique() == len(series):
+        if series.nunique() > len(series) * 0.9:  # >90% unikalnych
+            return True
+    
+    return False
+
+
 class SmartTargetDetector:
     """
-    Heurystyczny detektor targetu.
-    Priorytet:
-      1) kolumny cenowe (AveragePrice/price/target_price/close itp.),
-      2) 'target'/'label'/'y',
-      3) kolumna kategoryczna o sensownej kardynalności,
-      4) fallback: ostatnia sensowna kolumna z danych.
-    Pomija ID-like i całe puste.
+    Zaawansowany detektor potencjalnych targetów w DataFrame.
+    Używa heurystyk i wzorców do rankingu kolumn.
     """
+    
+    def __init__(self):
+        self.price_keywords = [
+            'price', 'cost', 'value', 'amount', 'sum', 'total',
+            'revenue', 'sales', 'income', 'profit', 'salary',
+            'fee', 'charge', 'rate', 'wage'
+        ]
+        
+        self.target_keywords = [
+            'target', 'label', 'y', 'outcome', 'result',
+            'prediction', 'class', 'category', 'response'
+        ]
+        
+        self.exclusion_keywords = [
+            'id', 'uuid', 'key', 'index', 'date', 'time',
+            'name', 'description', 'comment', 'note'
+        ]
+    
+    def analyze_columns(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """
+        Analizuje wszystkie kolumny i zwraca ranking potencjalnych targetów.
+        """
+        candidates = []
+        
+        for col in df.columns:
+            score, reasons = self._score_column(df, col)
+            if score > 0:
+                candidates.append({
+                    'column': col,
+                    'score': score,
+                    'reasons': reasons,
+                    'problem_type': infer_problem_type(df, col),
+                    'data_quality': self._assess_data_quality(df[col])
+                })
+        
+        # Sortuj według score
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        return candidates
+    
+    def _score_column(self, df: pd.DataFrame, col: str) -> Tuple[float, List[str]]:
+        """Ocenia kolumnę jako potencjalny target."""
+        score = 0.0
+        reasons = []
+        series = df[col]
+        
+        # Sprawdź wykluczenia
+        if is_id_like(series, col):
+            return 0.0, ["Wygląda jak identyfikator"]
+        
+        col_lower = col.lower()
+        
+        # Bonus za słowa kluczowe w nazwie
+        for keyword in self.price_keywords:
+            if keyword in col_lower:
+                score += 3.0
+                reasons.append(f"Nazwa zawiera '{keyword}' (prawdopodobnie wartość do predykcji)")
+                break
+        
+        for keyword in self.target_keywords:
+            if keyword in col_lower:
+                score += 2.5
+                reasons.append(f"Nazwa zawiera '{keyword}' (klasyczny target)")
+                break
+        
+        # Malus za wykluczenia
+        for keyword in self.exclusion_keywords:
+            if keyword in col_lower:
+                score -= 2.0
+                reasons.append(f"Nazwa zawiera '{keyword}' (prawdopodobnie nie target)")
+        
+        # Bonus za pozycję (ostatnia kolumna często to target)
+        if list(df.columns).index(col) == len(df.columns) - 1:
+            score += 1.0
+            reasons.append("Ostatnia kolumna (częsta konwencja dla targetu)")
+        
+        # Analiza danych
+        if pd.api.types.is_numeric_dtype(series):
+            nunique = series.nunique()
+            total = len(series)
+            
+            # Regresja - wysokie zróżnicowanie
+            if nunique / total > 0.5:
+                score += 1.5
+                reasons.append("Wysokie zróżnicowanie wartości (kandydat na regresję)")
+            
+            # Klasyfikacja - średnie zróżnicowanie
+            elif 2 <= nunique <= 20:
+                score += 2.0
+                reasons.append(f"Optymalna liczba klas ({nunique}) dla klasyfikacji")
+        
+        # Sprawdź braki danych (malus)
+        null_ratio = series.isna().mean()
+        if null_ratio > 0.3:
+            score -= 1.0
+            reasons.append(f"Dużo braków danych ({null_ratio:.1%})")
+        
+        return max(0.0, score), reasons
+    
+    def _assess_data_quality(self, series: pd.Series) -> Dict[str, Any]:
+        """Ocenia jakość danych w kolumnie."""
+        return {
+            'null_ratio': series.isna().mean(),
+            'unique_ratio': series.nunique() / len(series),
+            'dtype': str(series.dtype),
+            'has_outliers': self._detect_outliers(series)
+        }
+    
+    def _detect_outliers(self, series: pd.Series) -> bool:
+        """Wykrywa obecność outlierów w serii numerycznej."""
+        if not pd.api.types.is_numeric_dtype(series):
+            return False
+        
+        clean_series = series.dropna()
+        if len(clean_series) < 4:
+            return False
+        
+        try:
+            Q1 = clean_series.quantile(0.25)
+            Q3 = clean_series.quantile(0.75)
+            IQR = Q3 - Q1
+            
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            
+            outliers = clean_series[(clean_series < lower_bound) | (clean_series > upper_bound)]
+            return len(outliers) > 0
+        except Exception:
+            return False
 
-    min_class_samples: int = 2           # aby uznać klasyfikację, każda klasa musi mieć >= 2 wystąpień
-    max_class_cardinality: int = 50      # zbyt wiele klas -> mały priorytet dla klasyfikacji
-    prefer_categorical: bool = True
 
-    def detect_target(self, df: pd.DataFrame) -> Optional[str]:
-        if df is None or df.empty:
-            return None
-
-        valid = _valid_columns(df)
-
-        # 1) priorytet cenowy (wg listy, niezależnie od kolejności w df)
-        norm_map = { _normalize_name(c): c for c in valid }
-        for key in PRICE_PRIORITY_ORDER:
-            k = _normalize_name(key)
-            if k in norm_map:
-                return norm_map[k]
-
-        # 2) klasyczne nazwy targetu
-        for key in CLASSIC_TARGET_ORDER:
-            k = _normalize_name(key)
-            if k in norm_map:
-                return norm_map[k]
-
-        # 3) preferuj kategoryczne (jeśli włączone)
-        if self.prefer_categorical:
-            cat_first = self._best_categorical(df, valid)
-            if cat_first:
-                return cat_first
-
-        # 4) fallback – ostatnia „sensowna” kolumna (często target jest na końcu pliku)
-        return valid[-1] if valid else None
-
-    def _best_categorical(self, df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-        best: Optional[str] = None
-        best_score = -1.0
-        for c in candidates:
-            s = df[c]
-            try:
-                nunique = s.nunique(dropna=True)
-                n = len(s) if len(s) else 1
-                if 1 < nunique <= self.max_class_cardinality:
-                    vc = s.value_counts(dropna=True)
-                    if (vc >= self.min_class_samples).all():
-                        score = -(nunique)  # mniejsza kardynalność -> lepiej
-                        if score > best_score:
-                            best_score = score
-                            best = c
-            except Exception:
-                continue
-        return best
-
-def auto_pick_target(df: pd.DataFrame) -> Optional[str]:
-    """Szybki wybór targetu (alias dla detektora)."""
-    return SmartTargetDetector().detect_target(df)
-
-def infer_problem_type(df: pd.DataFrame, target: str) -> str:
+def validate_dataframe(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Heurystyczna detekcja typu problemu:
-    - jeśli dtype liczbowy i kardynalność > 20% liczby wierszy → 'regression'
-    - jeśli dtype kategoryczny/tekstowy lub niska kardynalność → 'classification'
+    Waliduje DataFrame pod kątem gotowości do ML.
+    Zwraca raport z problemami i zaleceniami.
     """
-    if target not in df.columns:
-        return "other"
-    s = df[target]
+    report = {
+        'valid': True,
+        'errors': [],
+        'warnings': [],
+        'suggestions': [],
+        'stats': {}
+    }
+    
+    # Podstawowe sprawdzenia
+    if df.empty:
+        report['valid'] = False
+        report['errors'].append("DataFrame jest pusty")
+        return report
+    
+    if len(df.columns) < 2:
+        report['valid'] = False
+        report['errors'].append("Za mało kolumn (minimum 2 wymagane)")
+        return report
+    
+    # Statystyki
+    report['stats'] = {
+        'n_rows': len(df),
+        'n_cols': len(df.columns),
+        'memory_mb': df.memory_usage(deep=True).sum() / 1024 / 1024,
+        'null_cells': df.isna().sum().sum(),
+        'duplicate_rows': df.duplicated().sum()
+    }
+    
+    # Sprawdź braki danych
+    null_cols = df.columns[df.isna().any()].tolist()
+    if null_cols:
+        total_nulls = df[null_cols].isna().sum().sum()
+        null_ratio = total_nulls / (len(df) * len(null_cols))
+        
+        if null_ratio > 0.5:
+            report['errors'].append(f"Bardzo dużo braków danych ({null_ratio:.1%})")
+        elif null_ratio > 0.2:
+            report['warnings'].append(f"Dużo braków danych ({null_ratio:.1%})")
+            report['suggestions'].append("Rozważ uzupełnienie lub usunięcie kolumn z brakami")
+    
+    # Sprawdź duplikaty
+    if report['stats']['duplicate_rows'] > 0:
+        dup_ratio = report['stats']['duplicate_rows'] / len(df)
+        if dup_ratio > 0.1:
+            report['warnings'].append(f"Dużo duplikatów ({dup_ratio:.1%})")
+            report['suggestions'].append("Rozważ usunięcie duplikatów")
+    
+    # Sprawdź kolumny stałe
+    constant_cols = [col for col in df.columns if df[col].nunique() <= 1]
+    if constant_cols:
+        report['warnings'].append(f"Kolumny stałe: {constant_cols}")
+        report['suggestions'].append("Usuń kolumny stałe - nie wnoszą informacji")
+    
+    # Sprawdź potencjalne ID
+    id_cols = [col for col in df.columns if is_id_like(df[col], col)]
+    if id_cols:
+        report['suggestions'].append(f"Potencjalne ID do usunięcia: {id_cols}")
+    
+    # Sprawdź typy danych
+    object_cols = df.select_dtypes(include=['object']).columns.tolist()
+    if object_cols:
+        high_cardinality = [col for col in object_cols if df[col].nunique() > len(df) * 0.5]
+        if high_cardinality:
+            report['warnings'].append(f"Wysoką kardynalność: {high_cardinality}")
+            report['suggestions'].append("Kolumny o wysokiej kardynalności mogą być problematyczne")
+    
+    return report
 
-    # liczbowy?
-    is_numeric = pd.api.types.is_numeric_dtype(s)
-    try:
-        nunique = s.nunique(dropna=True)
-        n = len(s) if len(s) else 1
-        high_card = nunique >= max(20, int(0.2 * n))
-    except Exception:
-        nunique, n, high_card = 2, 10, False
 
-    if is_numeric and high_card:
-        return "regression"
-
-    # jeśli tylko dwie klasy → binary classification
-    if nunique == 2:
-        return "classification"
-
-    # tekst/kategoria/mała kardynalność → classification
-    if not is_numeric or not high_card:
-        return "classification"
-
-    return "other"
-
-
-# ===========================
-#  Drobne, ale przydatne I/O
-# ===========================
-def hash_dataframe_signature(df: pd.DataFrame, max_rows: int = 2000) -> str:
+def preprocess_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Tworzy krótki hash sygnatury danych (kolumny + sample wartości),
-    przydatne do nazywania artefaktów modelu.
+    Czyści nazwy kolumn z problematycznych znaków.
+    Zapewnia kompatybilność z algorytmami ML.
     """
-    sample = df.head(max_rows).to_dict(orient="list")
-    payload = json.dumps(
-        {"columns": list(df.columns), "sample": sample},
-        ensure_ascii=False, sort_keys=True, default=str
-    ).encode("utf-8")
-    return hashlib.sha1(payload).hexdigest()[:10]  # krótszy identyfikator
+    df_copy = df.copy()
+    
+    # Mapa czyszczenia
+    new_names = {}
+    
+    for col in df_copy.columns:
+        new_name = str(col).strip()
+        
+        # Usuń problematyczne znaki
+        new_name = re.sub(r'[^\w\s]', '_', new_name)
+        
+        # Usuń wielokrotne spacje/underscores
+        new_name = re.sub(r'[\s_]+', '_', new_name)
+        
+        # Usuń underscore na początku/końcu
+        new_name = new_name.strip('_')
+        
+        # Sprawdź czy nie jest puste
+        if not new_name:
+            new_name = f"col_{list(df_copy.columns).index(col)}"
+        
+        # Sprawdź unikalnośc
+        original_new_name = new_name
+        counter = 1
+        while new_name in new_names.values():
+            new_name = f"{original_new_name}_{counter}"
+            counter += 1
+        
+        new_names[col] = new_name
+    
+    return df_copy.rename(columns=new_names)
 
-def flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
-    """Spłaszcza słownik zagnieżdżony do kluczy 'a.b.c'."""
-    items: List[Tuple[str, Any]] = []
-    for k, v in (d or {}).items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else str(k)
-        if isinstance(v, dict):
-            items.extend(flatten_dict(v, new_key, sep=sep).items())
+
+def detect_data_types(df: pd.DataFrame) -> Dict[str, List[str]]:
+    """
+    Kategoryzuje kolumny według typu danych i charakterystyk.
+    """
+    categorization = {
+        'numeric': [],
+        'categorical': [],
+        'boolean': [],
+        'datetime': [],
+        'text': [],
+        'id_like': [],
+        'constant': [],
+        'high_cardinality': []
+    }
+    
+    for col in df.columns:
+        series = df[col]
+        
+        # Sprawdź czy stałe
+        if series.nunique() <= 1:
+            categorization['constant'].append(col)
+            continue
+        
+        # Sprawdź czy ID-like
+        if is_id_like(series, col):
+            categorization['id_like'].append(col)
+            continue
+        
+        # Sprawdź typy danych
+        if pd.api.types.is_numeric_dtype(series):
+            categorization['numeric'].append(col)
+        
+        elif pd.api.types.is_bool_dtype(series):
+            categorization['boolean'].append(col)
+        
+        elif pd.api.types.is_datetime64_any_dtype(series):
+            categorization['datetime'].append(col)
+        
         else:
-            items.append((new_key, v))
-    return dict(items)
+            # Object/string - sprawdź karakterystyki
+            unique_ratio = series.nunique() / len(series)
+            
+            if unique_ratio > 0.5:
+                categorization['high_cardinality'].append(col)
+            elif series.nunique() <= 50:
+                categorization['categorical'].append(col)
+            else:
+                categorization['text'].append(col)
+    
+    return categorization
 
 
-# ===========================
-#  Przyjazne komunikaty/flags
-# ===========================
-def optional_dep_message() -> str:
+def generate_ml_report(df: pd.DataFrame, target_col: Optional[str] = None) -> str:
     """
-    Zwraca krótki status opcjonalnych zależności — można pokazać w zakładce Debug.
+    Generuje kompleksowy raport gotowości danych do ML.
     """
-    parts = []
-    for mod, ok in OPTIONALS.items():
-        parts.append(f"{mod}: {'OK' if ok else 'brak'}")
-    return " | ".join(parts)
+    report_lines = ["# 📊 Raport analizy danych dla Machine Learning\n"]
+    
+    # Podstawowe info
+    report_lines.append(f"**Rozmiar danych:** {len(df):,} wierszy × {len(df.columns)} kolumn")
+    report_lines.append(f"**Pamięć:** {df.memory_usage(deep=True).sum() / 1024 / 1024:.1f} MB\n")
+    
+    # Walidacja
+    validation = validate_dataframe(df)
+    
+    if not validation['valid']:
+        report_lines.append("## ❌ Błędy krytyczne")
+        for error in validation['errors']:
+            report_lines.append(f"- {error}")
+        report_lines.append("")
+    
+    if validation['warnings']:
+        report_lines.append("## ⚠️ Ostrzeżenia")
+        for warning in validation['warnings']:
+            report_lines.append(f"- {warning}")
+        report_lines.append("")
+    
+    if validation['suggestions']:
+        report_lines.append("## 💡 Zalecenia")
+        for suggestion in validation['suggestions']:
+            report_lines.append(f"- {suggestion}")
+        report_lines.append("")
+    
+    # Analiza typów
+    types = detect_data_types(df)
+    report_lines.append("## 📋 Kategoryzacja kolumn")
+    
+    for category, columns in types.items():
+        if columns:
+            report_lines.append(f"**{category.title()}:** {', '.join(columns)}")
+    
+    report_lines.append("")
+    
+    # Analiza targetu
+    if target_col and target_col in df.columns:
+        report_lines.append(f"## 🎯 Analiza targetu: {target_col}")
+        
+        target_series = df[target_col]
+        problem_type = infer_problem_type(df, target_col)
+        
+        report_lines.append(f"**Typ problemu:** {problem_type}")
+        report_lines.append(f"**Typ danych:** {target_series.dtype}")
+        report_lines.append(f"**Unikalne wartości:** {target_series.nunique()}")
+        report_lines.append(f"**Braki:** {target_series.isna().sum()} ({target_series.isna().mean():.1%})")
+        
+        if problem_type == "classification":
+            value_counts = target_series.value_counts()
+            report_lines.append(f"**Rozkład klas:** {dict(value_counts.head())}")
+            
+            if len(value_counts) > 1:
+                imbalance = value_counts.max() / value_counts.min()
+                report_lines.append(f"**Balans klas:** {imbalance:.1f}:1")
+        
+        report_lines.append("")
+    
+    # Zalecenia finalne
+    report_lines.append("## 🚀 Następne kroki")
+    
+    if validation['valid']:
+        report_lines.append("✅ Dane są gotowe do treningu ML")
+        if target_col:
+            report_lines.append(f"✅ Target '{target_col}' został wybrany")
+        else:
+            report_lines.append("🔸 Wybierz kolumnę targetu aby rozpocząć trening")
+    else:
+        report_lines.append("❌ Napraw błędy krytyczne przed treningiem")
+    
+    return "\n".join(report_lines)
 
 
-# ======= __all__ =======
-__all__ = [
-    # klucze/sekrety
-    "get_openai_key_from_envs",
-    # czas
-    "utc_now_iso_z", "to_utc_iso_z", "to_local",
-    # seed
-    "seed_everything",
-    # target/problem
-    "SmartTargetDetector", "auto_pick_target", "infer_problem_type", "is_id_like",
-    # opcjonalne zależności
-    "HAS_MATPLOTLIB", "HAS_SEABORN", "HAS_XGBOOST", "HAS_LGBM", "HAS_CATBOOST",
-    "optional_dep_message",
-    # drobiazgi
-    "hash_dataframe_signature", "flatten_dict",
-]
+# Narzędzia do debugowania
+def debug_dataframe(df: pd.DataFrame) -> None:
+    """Szybki debug info o DataFrame."""
+    print(f"📊 DataFrame Debug Info:")
+    print(f"   Shape: {df.shape}")
+    print(f"   Memory: {df.memory_usage(deep=True).sum() / 1024 / 1024:.1f} MB")
+    print(f"   Nulls: {df.isna().sum().sum()} cells")
+    print(f"   Dtypes: {dict(df.dtypes.value_counts())}")
+    
+    # Próbka danych
+    print(f"\n🔍 Sample data:")
+    print(df.head(3))
+
+
+def compare_dataframes(df1: pd.DataFrame, df2: pd.DataFrame) -> Dict[str, Any]:
+    """Porównuje dwa DataFrames i zwraca różnice."""
+    comparison = {
+        'shape_changed': df1.shape != df2.shape,
+        'columns_changed': list(df1.columns) != list(df2.columns),
+        'signature_changed': hash_dataframe_signature(df1) != hash_dataframe_signature(df2)
+    }
+    
+    if comparison['columns_changed']:
+        comparison['added_columns'] = list(set(df2.columns) - set(df1.columns))
+        comparison['removed_columns'] = list(set(df1.columns) - set(df2.columns))
+    
+    return comparison
