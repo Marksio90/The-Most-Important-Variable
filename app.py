@@ -235,6 +235,39 @@ def render_download_buttons(export_files: dict) -> None:
             use_container_width=True,
         )
 
+# === NORMALIZACJA WYJŚCIA z render_upload_section() ===
+def _coerce_uploaded_to_df(uploaded_data):
+    """
+    Przyjmuje to, co zwraca render_upload_section() i próbuje wydobyć:
+    (df: pd.DataFrame | None, dataset_name: str, status_msg: str)
+    Obsługuje: DataFrame, (df, name, msg), {'df':..., 'name':...}, None.
+    """
+    if uploaded_data is None:
+        return None, "", ""
+
+    # bezpośrednio DF
+    if isinstance(uploaded_data, pd.DataFrame):
+        return uploaded_data, "uploaded_dataframe", "ok"
+
+    # tuple/list (df, name, msg?) albo (df, name)
+    if isinstance(uploaded_data, (tuple, list)):
+        if len(uploaded_data) >= 1 and isinstance(uploaded_data[0], pd.DataFrame):
+            df = uploaded_data[0]
+            name = uploaded_data[1] if len(uploaded_data) >= 2 and isinstance(uploaded_data[1], str) else "dataset"
+            msg  = uploaded_data[2] if len(uploaded_data) >= 3 and isinstance(uploaded_data[2], str) else ""
+            return df, name, msg
+
+    # dict {'df':..., 'dataset_name':..., 'status':...}
+    if isinstance(uploaded_data, dict):
+        df = uploaded_data.get("df") or uploaded_data.get("dataframe")
+        if isinstance(df, pd.DataFrame):
+            name = uploaded_data.get("dataset_name") or uploaded_data.get("name") or "dataset"
+            msg  = uploaded_data.get("status") or ""
+            return df, name, msg
+
+    # nic nie pasuje
+    return None, "", ""
+
 # ====== NASZE MODUŁY (z paczek 1-8) ======
 from config.settings import get_settings
 from frontend.ui_components import (
@@ -409,52 +442,60 @@ class TMIVApp:
     def _render_upload_tab(self):
         """Renderuje zakładkę wczytywania danych."""
         st.header("📤 Wczytywanie danych")
-        
-        # Upload section
-        uploaded_data = render_upload_section()
-        
-        # >>> FIX: NIE używamy "if uploaded_data:" dla obiektu tuple/DF!
-        if uploaded_data is not None and isinstance(uploaded_data, (list, tuple)) and len(uploaded_data) == 3 and uploaded_data[0] is not None and isinstance(uploaded_data[0], pd.DataFrame) and not uploaded_data[0].empty:
-            df, dataset_name, status_msg = uploaded_data
-            
-            if df is not None:
-                st.session_state.df = df
-                st.session_state.dataset_name = dataset_name
-                st.session_state.data_processed = True
-                
-                # Walidacja danych
-                validation_result = validate_dataframe(df)
-                if validation_result['valid']:
-                    st.markdown(f"""
-                    <div class="success-box">
-                        ✅ <strong>Dane wczytane pomyślnie!</strong><br>
-                        📊 Dataset: <code>{dataset_name}</code><br>
-                        📏 Rozmiar: {len(df):,} wierszy × {len(df.columns):,} kolumn<br>
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f"""
-                    <div class="warning-box">
-                        ⚠️ <strong>Wykryto potencjalne problemy w danych:</strong><br>
-                        {validation_result['message']}
-                    </div>
-                    """, unsafe_allow_html=True)
+
+        uploaded_raw = render_upload_section()
+        df_new, dataset_name, status_msg = _coerce_uploaded_to_df(uploaded_raw)
+
+        # Jeśli nic nowego nie przyszło, ale mamy już DF w sesji – nie blokuj
+        if df_new is None and isinstance(st.session_state.get("df"), pd.DataFrame) and not st.session_state.df.empty:
+            st.success(
+                f"✅ Dane są już wczytane: **{st.session_state.dataset_name or 'dataset'}** "
+                f"({len(st.session_state.df):,} × {st.session_state.df.shape[1]:,})"
+            )
+            if (st.session_state.dataset_name or "").lower() in {"boston_housing", "boston"}:
+                st.warning("Dataset **Boston Housing** jest przestarzały. Rozważ użycie np. **California Housing**.")
+            return
+
+        # Przyszły nowe dane – waliduj i zapisz
+        if isinstance(df_new, pd.DataFrame) and not df_new.empty:
+            st.session_state.df = df_new
+            st.session_state.dataset_name = dataset_name or "dataset"
+            st.session_state.data_processed = True
+
+            validation_result = validate_dataframe(df_new)
+            if validation_result.get('valid', True):
+                st.markdown(f"""
+                <div class="success-box">
+                    ✅ <strong>Dane wczytane pomyślnie!</strong><br>
+                    📊 Dataset: <code>{st.session_state.dataset_name}</code><br>
+                    📏 Rozmiar: {len(df_new):,} wierszy × {len(df_new.columns):,} kolumn<br>
+                    {status_msg or ''}
+                </div>
+                """, unsafe_allow_html=True)
             else:
-                st.error("Nie udało się wczytać danych.")
-        else:
-            st.info("Wgraj plik, aby przejść dalej.")
+                st.markdown(f"""
+                <div class="warning-box">
+                    ⚠️ <strong>Wykryto potencjalne problemy w danych:</strong><br>
+                    {validation_result.get('message','')}
+                </div>
+                """, unsafe_allow_html=True)
+
+            if (st.session_state.dataset_name or "").lower() in {"boston_housing", "boston"}:
+                st.warning("Dataset **Boston Housing** jest przestarzały (deprecated). "
+                           "Użyj własnych danych lub np. **California Housing**. "
+                           "To tylko informacja — możesz iść dalej.")
+            return
+
+        # Brak danych w ogóle
+        st.info("Wgraj plik **lub** wybierz dane przykładowe/URL, aby przejść dalej.")
     
     def _render_data_tab(self):
         """Renderuje zakładkę danych z rozbudowanym podglądem."""
         st.header("📊 Analiza danych")
-        
-        if st.session_state.df is None:
-            st.info("🔼 Najpierw wczytaj dane w zakładce 'Wczytywanie'")
+        df = st.session_state.get("df")
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            st.info("🔼 Najpierw wczytaj dane w zakładce **Wczytywanie** (plik / URL / dane przykładowe).")
             return
-        
-        df = st.session_state.df
-        
-        # Podgląd danych (bez dodatkowych suwaków/siatek itd.)
         render_data_preview_enhanced(df, st.session_state.dataset_name)
     
     def _render_eda_tab(self):
@@ -466,8 +507,6 @@ class TMIVApp:
             return
         
         df = st.session_state.df
-        
-        # Rozbudowane EDA (jeśli w komponentach są zbędne kontrolki — można je tam wyciąć)
         render_eda_section(df)
     
     def _render_target_tab(self):
@@ -552,7 +591,7 @@ class TMIVApp:
         target = st.session_state.selected_target
         problem_type = infer_problem_type(df[target])
         
-        # Pobierz konfigurację (tu możesz okroić komponent z “bajerów”, jeśli chcesz)
+        # Pobierz konfigurację
         model_config = render_model_config_section(df, target, problem_type)
         
         if model_config and st.button("🚀 Rozpocznij trening modelu", type="primary", use_container_width=True):
@@ -679,10 +718,6 @@ class TMIVApp:
                             nums.append(f"{k}: {v:.4f}")
                     if nums:
                         st.text(" | ".join(nums))
-                
-                # Pobranie modelu (jeśli wspierane)
-                # if st.button(f"📥 Pobierz model {record.run_id[:8]}", key=f"download_{record.id}"):
-                #     st.info("Funkcja pobierania może wymagać dodatkowej konfiguracji.")
     
     def _render_header(self):
         """Renderuje nagłówek aplikacji."""
