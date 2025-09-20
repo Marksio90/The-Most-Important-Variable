@@ -1,22 +1,65 @@
-# app.py — ZMODERNIZOWANA APLIKACJA TMIV z pełną integracją wszystkich modułów
 from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from typing import Optional, Dict, Any
-import traceback
-import time
 import io
 import mimetypes
-import os  # <-- potrzebne dla env
+import os
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-# === ENV & OpenAI key helpers (override) ===
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# ENV
 try:
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
+
+# === nasze moduły ===
+from config.settings import get_settings
+from frontend.ui_components import (
+    render_sidebar,
+    render_footer,
+    render_model_config_section,
+    render_training_results,
+    render_data_preview_enhanced,
+)
+
+from backend.smart_target import SmartTargetSelector, format_target_explanation, format_alternatives_list
+from backend.smart_target_llm import (
+    LLMTargetSelector,
+    render_openai_config,
+    render_smart_target_section_with_llm,
+)
+from backend.ml_integration import (
+    ModelConfig,
+    train_model_comprehensive,
+    save_model_artifacts,
+    load_model_artifacts,
+    TrainingResult,
+)
+from backend.utils import (
+    infer_problem_type,
+    validate_dataframe,
+    seed_everything,
+    hash_dataframe_signature,
+    get_openai_key_from_envs,
+)
+from backend.report_generator import (
+    export_model_comprehensive,
+    generate_quick_report,
+    ModelReportGenerator,
+)
+from db.db_utils import (
+    DatabaseManager,
+    TrainingRecord,
+    create_training_record,
+    save_training_record,
+    get_training_history,
+)
 
 from pathlib import Path as _Path
 
