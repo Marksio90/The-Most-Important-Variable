@@ -1,17 +1,11 @@
-# db/db_utils.py — NAPRAWIONY: poprawiona obsługa timezone, lokalne czasy, rozbudowane funkcje
 from __future__ import annotations
 
-import json
 import sqlite3
-from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-import pandas as pd
-
-from backend.ml_integration import ModelConfig, TrainingResult
-from backend.utils import format_datetime_for_display, local_now_iso
+from config.settings import get_settings
 
 
 # ==========================
