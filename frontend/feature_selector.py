@@ -1,4 +1,8 @@
-# frontend/feature_selector.py
+from __future__ import annotations
+
+import pandas as pd
+import streamlit as st
+
 def render_interactive_feature_selection(df, target):
     st.subheader("🎯 Interaktywna selekcja cech")
     
