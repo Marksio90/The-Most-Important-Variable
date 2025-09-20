@@ -2,27 +2,31 @@
 [server]
 headless = true
 address = "0.0.0.0"
-port = 8501
+port = 8080  # DigitalOcean oczekuje portu 8080, nie 8501!
 
-# Bez konfliktu z XSRF – zostaw CORS włączony w PROD,
-# chyba że wiesz, co robisz (reverse proxy itp.).
-enableCORS = true
-enableXsrfProtection = true
+# Dla środowiska produkcyjnego:
+enableCORS = false
+enableXsrfProtection = false
+
+# Dodatkowe ustawienia dla stabilności
+maxUploadSize = 200
+maxMessageSize = 200
 
 [client]
-# Przydatne przy dłuższych jobach
-showErrorDetails = true
+showErrorDetails = false  # W produksji lepiej ukryć szczegóły błędów
 toolbarMode = "minimal"
 
 [browser]
+# Usuń lub zostaw puste - w produksji nie potrzeba
 gatherUsageStats = false
-serverAddress = "localhost"
-serverPort = 8501
 
 [runner]
-# Pozwala na ponowne uruchomienie z pamięcią stanu sesji
 magicEnabled = true
 fastReruns = true
 
 [logger]
-level = "info"
+level = "error"  # W produksji loguj tylko błędy
+
+[theme]
+# Opcjonalnie - ustaw tryb ciemny jako domyślny
+base = "dark"
