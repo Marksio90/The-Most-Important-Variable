@@ -1,13 +1,16 @@
+name: timv-app
 services:
-- name: your-app
+- name: web
   source_dir: /
   github:
-    repo: your-repo
+    repo: twoje-repo
     branch: main
-  run_command: streamlit run app.py --server.port=8080 --server.address=0.0.0.0
+  run_command: streamlit run app.py --server.port=8080 --server.address=0.0.0.0 --server.headless=true
   environment_slug: python
-  instance_count: 1
   instance_size_slug: basic-xxs
   http_port: 8080
   health_check:
-    http_path: /healthz
+    http_path: /
+    timeout_seconds: 60
+    period_seconds: 10
+    failure_threshold: 3
