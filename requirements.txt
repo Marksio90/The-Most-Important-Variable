@@ -23,6 +23,7 @@ kaleido>=0.2.1
 sqlalchemy>=2.0.0
 python-dotenv>=1.0.0
 pydantic>=2.4.0
+pydantic-settings>=2.0
 
 # DATA PROCESSING
 openpyxl>=3.1.0
