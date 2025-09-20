@@ -1,20 +1,12 @@
-# backend/smart_target_llm.py — NAPRAWIONY: automatyczne odświeżanie po ustawieniu klucza
 from __future__ import annotations
 
 import os
-import json
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import streamlit as st
 
-from backend.utils import (
-    get_openai_key_from_envs,
-    set_openai_key_temp,
-    clear_openai_key,
-    infer_problem_type,
-)
+from backend.utils import get_openai_key_from_envs
 
 
 # ==============================
