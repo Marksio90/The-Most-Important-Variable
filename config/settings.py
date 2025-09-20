@@ -1,46 +1,9 @@
-# settings.py — centralna konfiguracja TMIV (NAPRAWIONA: lepsze ładowanie .env, debug info)
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
-from functools import lru_cache
-from typing import List, Optional, Any, Dict, Union
-from pathlib import Path
-import json
 import os
+from typing import Optional
 
-# optional: Streamlit secrets (gdy aplikacja działa w Streamlit)
-try:
-    import streamlit as st  # type: ignore
-    HAS_STREAMLIT = True
-except Exception:
-    HAS_STREAMLIT = False
-
-# optional: pydantic v1/v2 (jeśli brak, użyjemy fallbacku z dataclass)
-try:
-    try:
-        from pydantic_settings import BaseSettings  # v2
-        from pydantic import Field
-        PydanticBase = BaseSettings  # type: ignore
-        PYD_VER = 2
-    except Exception:
-        from pydantic import BaseSettings, Field  # v1  # type: ignore
-        PydanticBase = BaseSettings  # type: ignore
-        PYD_VER = 1
-    HAS_PYDANTIC = True
-except Exception:
-    HAS_PYDANTIC = False
-    PydanticBase = object  # type: ignore
-    PYD_VER = 0
-    def Field(*args, **kwargs): return None  # type: ignore
-
-# optional: dotenv (lokalne .env podczas dev)
-try:
-    from dotenv import load_dotenv, find_dotenv  # type: ignore
-    HAS_DOTENV = True
-except Exception:
-    HAS_DOTENV = False
-
+from pydantic import BaseSettings
 
 # ==========================
 #  Pomocnicze konwersje ENV
