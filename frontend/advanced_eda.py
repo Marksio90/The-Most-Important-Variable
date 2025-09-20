@@ -1,18 +1,9 @@
-# frontend/advanced_eda.py — ROZBUDOWANE EDA z nowymi zakładkami i lepszymi wizualizacjami
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple, Any
-import pandas as pd
 import numpy as np
-import streamlit as st
+import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from pandas.api.types import is_datetime64_any_dtype
-from sklearn.preprocessing import LabelEncoder
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans
+import streamlit as st
 
 # -----------------------------
 # USTAWIENIA GLOBALNE
