@@ -1,42 +1,25 @@
-# backend/ml_integration.py — ULEPSZONY: więcej opcji treningu, lepsze metryki, zaawansowana optymalizacja
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+import time
+import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Dict, Optional, Tuple
 
-import json
+import joblib
 import numpy as np
 import pandas as pd
-import time
-
-# Bazowe ML
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor
+from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV
-from sklearn.preprocessing import OneHotEncoder, StandardScaler, RobustScaler, PowerTransformer
-from sklearn.impute import SimpleImputer, KNNImputer
-from sklearn.feature_selection import SelectKBest, f_regression, f_classif, RFE
-from sklearn.decomposition import PCA
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from sklearn.metrics import (
-    r2_score, mean_absolute_error, mean_squared_error, mean_absolute_percentage_error,
-    accuracy_score, f1_score, roc_auc_score, confusion_matrix, precision_score, recall_score,
-    classification_report, explained_variance_score, max_error
-)
+from backend.utils import infer_problem_type, seed_everything, validate_dataframe
+from config.settings import MLEngine
 
-from sklearn.ensemble import (
-    HistGradientBoostingRegressor, HistGradientBoostingClassifier,
-    VotingRegressor, VotingClassifier, StackingRegressor, StackingClassifier,
-    RandomForestRegressor, RandomForestClassifier, ExtraTreesRegressor, ExtraTreesClassifier
-)
-from sklearn.linear_model import Ridge, Lasso, LogisticRegression
-from sklearn.svm import SVR, SVC
-from sklearn.neighbors import KNeighborsRegressor, KNeighborsClassifier
-
-# Wersja sklearn (do metadanych/diagnoz)
-import sklearn
-SKLEARN_VERSION = sklearn.__version__
 
 # Opcjonalne silniki — import miękki
 def _soft_import(name: str):
