@@ -1,18 +1,19 @@
-# backend/utils.py — NAPRAWIONE: lepszy system kluczy OpenAI + timezone
-# frontend/ui_components.py — NAPRAWIONE: działające ustawienia, profesjonalna stopka, mniej duplikacji
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Any, Tuple
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import hashlib
+import os
+import random
+import re
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
-from backend.ml_integration import TrainingResult
-from backend.utils import infer_problem_type
-from config.settings import MLEngine
+import numpy as np
+import pandas as pd
+
+# tylko do adnotacji typów (nie w runtime)
+if TYPE_CHECKING:
+    from backend.ml_integration import TrainingResult
+
 
 
 # ==============================
