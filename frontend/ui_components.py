@@ -1,4 +1,3 @@
-# frontend/ui_components.py — NAPRAWIONE: działające ustawienia, profesjonalna stopka, mniej duplikacji
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Any, Tuple
@@ -33,7 +32,7 @@ def render_sidebar() -> Dict[str, Any]:
                 st.success("Wczytano .env / secrets. Klucz jest dostępny.")
             else:
                 st.error("Nie znaleziono klucza w .env ani w secrets.")
-            st.experimental_rerun()
+            st.rerun()
 
     with col2:
         if st.button("Wyczyść cache", use_container_width=True):
@@ -46,7 +45,7 @@ def render_sidebar() -> Dict[str, Any]:
             except Exception:
                 pass
             st.success("Cache wyczyszczony.")
-            st.experimental_rerun()
+            st.rerun()
 
     # --- Szybkie wklejenie klucza (opcjonalnie) ---
     with st.expander("Wklej klucz OpenAI (opcjonalnie)"):
@@ -56,7 +55,7 @@ def render_sidebar() -> Dict[str, Any]:
                 os.environ["OPENAI_API_KEY"] = typed_key.strip()
                 st.session_state["openai_api_key"] = typed_key.strip()
                 st.success("Klucz został ustawiony tymczasowo (nadpisuje .env do końca sesji).")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.warning("Wpisz klucz.")
 
@@ -66,7 +65,7 @@ def render_sidebar() -> Dict[str, Any]:
         for k in keys:
             del st.session_state[k]
         st.success("Ustawienia zresetowane.")
-        st.experimental_rerun()
+        st.rerun()
 
     # Zwracamy minimalny słownik (na wszelki wypadek)
     return {
