@@ -1,22 +1,13 @@
-# backend/report_generator.py — NOWY: Komprehensywny generator raportów i eksportów
 from __future__ import annotations
 
-import json
-import time
-from datetime import datetime
+import io
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict
 
 import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import plotly.io as pio
-from plotly.subplots import make_subplots
 
-from backend.ml_integration import TrainingResult, ModelConfig
-from backend.utils import format_datetime_for_display, local_now_iso
-from db.db_utils import TrainingRecord, DatabaseManager
+from backend.ml_integration import TrainingResult
 
 
 class ModelReportGenerator:
