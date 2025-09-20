@@ -1,15 +1,18 @@
 # backend/utils.py — NAPRAWIONE: lepszy system kluczy OpenAI + timezone
+# frontend/ui_components.py — NAPRAWIONE: działające ustawienia, profesjonalna stopka, mniej duplikacji
 from __future__ import annotations
 
-import hashlib
-import os
-import random
-import re
-from typing import Any, Dict, List, Optional, Union, Tuple
-from datetime import datetime, timezone
-
-import numpy as np
+from typing import Dict, List, Optional, Any, Tuple
+import streamlit as st
 import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from backend.ml_integration import TrainingResult
+from backend.utils import infer_problem_type
+from config.settings import MLEngine
 
 
 # ==============================
