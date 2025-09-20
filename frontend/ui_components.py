@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Any, Tuple
-import streamlit as st
-import pandas as pd
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
 from plotly.subplots import make_subplots
 
-from backend.ml_integration import TrainingResult
 from backend.utils import infer_problem_type
+from backend.ml_integration import TrainingResult
 from config.settings import MLEngine
 
 
