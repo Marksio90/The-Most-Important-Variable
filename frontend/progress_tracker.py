@@ -1,4 +1,6 @@
-# frontend/progress_tracker.py
+from __future__ import annotations
+
+import streamlit as st
 class ProgressTracker:
     def __init__(self):
         self.progress_bar = st.progress(0)
