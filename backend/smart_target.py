@@ -1,14 +1,9 @@
-# backend/smart_target.py — Podstawowy inteligentny wybór targetu (bez LLM)
 from __future__ import annotations
 
-import pandas as pd
+from typing import Any, Dict, List
+
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
-import re
-from collections import Counter
-
-from backend.utils import infer_problem_type
-
+import pandas as pd
 
 class SmartTargetSelector:
     """
